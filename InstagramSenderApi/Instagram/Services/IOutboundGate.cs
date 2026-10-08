@@ -39,8 +39,8 @@ public interface IOutboundGate
 
 /// <summary>
 /// Pre-flight order, spaced so a gate can be inserted without renumbering. The per-second gate is
-/// deliberately last: it hands out a token for *now*, so anything that sleeps must already have
-/// slept, or the token is spent on a call that has not happened yet.
+/// deliberately last: it reserves a dispatch slot for *now*, so anything that sleeps must already
+/// have slept, or the slot is spent on a call that has not happened yet.
 /// </summary>
 public static class GateOrder
 {

@@ -23,7 +23,7 @@ public sealed class InstagramThrottleGuard
         IOptions<OutboundRateLimitOptions> options)
     {
         // Order is a property, not registration order: the per-second gate must run last or its
-        // token is spent before an earlier gate's sleep, and that is not a wiring detail.
+        // slot is reserved before an earlier gate's sleep, and that is not a wiring detail.
         _gates   = gates.OrderBy(g => g.Order).ToArray();
         _options = options;
     }

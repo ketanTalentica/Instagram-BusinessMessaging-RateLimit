@@ -480,15 +480,15 @@ when `message.attachment.type` is audio or video and TextSend otherwise, anythin
 ([DispatchClass.cs:39-59](../InstagramSenderApi/Instagram/Services/DispatchClass.cs#L39-L59)). A
 malformed payload falls back to the text class rather than throwing: misclassifying one call must
 never fail a send. The class travels to the gate on an `OutboundDispatch`, and each class keeps its
-own bucket
-([PerSecondDispatchGate.cs:49](../InstagramSenderApi/Instagram/Services/PerSecondDispatchGate.cs#L49)),
+own window
+([PerSecondDispatchGate.cs:80](../InstagramSenderApi/Instagram/Services/PerSecondDispatchGate.cs#L80)),
 so 100 text/s and 2 Conversations/s run concurrently instead of sharing one cap.
 
 Both calls below hit the **same** `/messages` endpoint — only the payload differs, and that is what
 selects the cap. Restart the sender without the `PerSecondDispatchLimit` override from §1 so the
 defaults (100 / 10 / 2 / 2) are in force.
 
-A `ForEach-Object { curl … }` loop is **too slow** to fill a per-second bucket (each curl process
+A `ForEach-Object { curl … }` loop is **too slow** to fill a per-second window (each curl process
 costs tens of ms). Use one curl process with `--next` so 20 requests are enqueued in ~250 ms:
 
 ```powershell
@@ -643,8 +643,8 @@ and 3.x on 2026-07-07, 2.5–2.8 on 2026-08-04.
 | 2.6 | 613 / subcode 1996 (A12.2) | 15-min floor applied from the subcode alone (no ETA in the response) |
 | 2.7 | App-level block, code 4 (A12.7) | Block on `app:{AppId}`, receiving account unblocked at its own 20 %, unrelated tenant `held by an APP-level block for 00:06:55` with no HTTP call |
 | 2.8 | Per-class per-second caps (A12.3) | 20 video sends → 2 waits at `cap=10/s` (longest 858 ms: the 11th call waits until the 1st is a second old, after which the queue's own pace keeps the rest inside the window); 20 text sends on the same endpoint → 0 waits; 6 `/conversations` → 4 waits at `cap=2/s` (2026-10-08). Under the token bucket media showed ~10 short waits |
-| 3.1 | Per-IP window regression | 60×202 + 140×429 (2026-07-07), 47×202 + 153×429 (2026-08-05), Retry-After 59 |
+| 3.1 | Per-IP window regression | 60×202 + 140×429 (2026-07-07), 47×202 + 153×429 (2026-08-05), Retry-After 59. 2026-10-08: 47×202 + 13×429 concurrency + 140×429 per-IP; 47 + 13 = 60 because counters run before the concurrency rule |
 | 3.1 | Global window | 780×202 + 180×429 at 1000/min |
 | 3.2 | ExcludedPaths / GET bypass | POST /health 200 during saturated window; GET routed normally |
-| 3.3 | Observe-only | 200×202 passed, 0 denied + 100 would-deny log lines |
+| 3.3 | Observe-only | 200×202 passed, 0 denied + 100 would-deny log lines. 2026-10-08: 200×202, 0 denied, 153 would-deny lines (13 concurrency + 140 per-IP, the same split 3.1 enforced) |
 | all | Mock-only guard | `Assert-MockOnly` + probe call read back off the mock at every startup |

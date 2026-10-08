@@ -70,18 +70,18 @@ public class OutboundGateTests
     }
 
     [Fact]
-    public async Task Classes_hold_separate_buckets_so_one_does_not_starve_another()
+    public async Task Classes_hold_separate_windows_so_one_does_not_starve_another()
     {
         var gate = Gate();
 
-        await WaitsIn(gate, "t", DispatchClass.Conversations, 2);   // drains the 2/s bucket
+        await WaitsIn(gate, "t", DispatchClass.Conversations, 2);   // fills the 2/s window
 
         // Text has its own 100/s allowance and must be unaffected.
         Assert.Equal(TimeSpan.Zero, await gate.GetDelayAsync(new OutboundDispatch("t", DispatchClass.TextSend)));
     }
 
     [Fact]
-    public async Task Tenants_hold_separate_buckets()
+    public async Task Tenants_hold_separate_windows()
     {
         var gate = Gate();
 
@@ -175,7 +175,7 @@ public class OutboundGateTests
         var (guard, _) = BuildGuard();
 
         // Deliberately constructed per-second-first above; the guard must reorder it last,
-        // or its token is spent before the proactive delay has been slept through.
+        // or its slot is reserved before the proactive delay has been slept through.
         Assert.Equal(["header-usage throttle", "per-second dispatch"], guard.Gates.Select(g => g.Name));
     }
 

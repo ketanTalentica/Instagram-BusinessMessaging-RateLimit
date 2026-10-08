@@ -1,0 +1,627 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rate-Limiting Design Map</title>
+<style>
+:root{
+  --bg:#f6f7f9; --panel:#ffffff; --ink:#1b1f24; --muted:#5d6672; --line:#d9dde3; --soft:#eef1f5;
+  --ours:#2563eb; --ours-bg:#e7efff; --mock:#b45309; --mock-bg:#fdf1e2;
+  --ok:#15803d; --ok-bg:#e3f5e9; --bad:#c62828; --bad-bg:#fde8e8; --warn:#c2410c; --warn-bg:#fdeee4;
+  --violet:#7c3aed; --violet-bg:#f0e9ff; --teal:#0f766e; --teal-bg:#e0f4f1;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f1216; --panel:#171b21; --ink:#e6e9ee; --muted:#9aa4b1; --line:#2c333d; --soft:#1f252d;
+    --ours:#6b9bff; --ours-bg:#1a2742; --mock:#f0a54a; --mock-bg:#33261a;
+    --ok:#4ade80; --ok-bg:#16301f; --bad:#f87171; --bad-bg:#3a1c1c; --warn:#fb923c; --warn-bg:#3a2516;
+    --violet:#a78bfa; --violet-bg:#271f3d; --teal:#2dd4bf; --teal-bg:#143230;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f1216; --panel:#171b21; --ink:#e6e9ee; --muted:#9aa4b1; --line:#2c333d; --soft:#1f252d;
+  --ours:#6b9bff; --ours-bg:#1a2742; --mock:#f0a54a; --mock-bg:#33261a;
+  --ok:#4ade80; --ok-bg:#16301f; --bad:#f87171; --bad-bg:#3a1c1c; --warn:#fb923c; --warn-bg:#3a2516;
+  --violet:#a78bfa; --violet-bg:#271f3d; --teal:#2dd4bf; --teal-bg:#143230;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+main{max-width:1080px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:26px;margin:0 0 4px}
+h2{font-size:20px;margin:40px 0 6px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:16px;margin:0}
+p{margin:6px 0}
+.sub{color:var(--muted)}
+code,.mono{font-family:Consolas,"SFMono-Regular",Menlo,monospace;font-size:.88em;overflow-wrap:anywhere}
+a{color:var(--ours)}
+nav.toc{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0 0}
+nav.toc a{padding:3px 10px;border:1px solid var(--line);border-radius:14px;text-decoration:none;color:var(--ink);background:var(--panel);font-size:13px}
+.grid{display:grid;gap:12px}
+.g2{grid-template-columns:repeat(auto-fit,minmax(min(100%,440px),1fr))}
+.g4{grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr))}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;min-width:0}
+.card.ours{border-top:4px solid var(--ours)}
+.card.mock{border-top:4px solid var(--mock)}
+.tag{display:inline-block;font-size:11px;font-weight:600;padding:1px 8px;border-radius:10px;margin-right:4px;vertical-align:middle}
+.t-ours{background:var(--ours-bg);color:var(--ours)}
+.t-mock{background:var(--mock-bg);color:var(--mock)}
+.t-ok{background:var(--ok-bg);color:var(--ok)}
+.t-bad{background:var(--bad-bg);color:var(--bad)}
+.t-warn{background:var(--warn-bg);color:var(--warn)}
+.t-vio{background:var(--violet-bg);color:var(--violet)}
+.t-teal{background:var(--teal-bg);color:var(--teal)}
+.t-soft{background:var(--soft);color:var(--muted)}
+ul.tight{margin:6px 0;padding-left:18px}
+ul.tight li{margin:2px 0}
+.svgbox{width:100%;overflow-x:auto}
+.svgbox svg{display:block;width:100%;height:auto;min-width:520px}
+svg text{fill:var(--ink);font-family:-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+svg .mut{fill:var(--muted)}
+svg .halo{paint-order:stroke;stroke:var(--panel);stroke-width:4px;stroke-linejoin:round}
+/* pipelines */
+.flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;margin:10px 0}
+.step{flex:1 1 130px;min-width:120px;background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:8px 10px;position:relative;margin:4px 18px 4px 0;font-size:13px}
+.step:not(:last-child)::after{content:"";position:absolute;right:-15px;top:50%;margin-top:-6px;border:6px solid transparent;border-left:9px solid var(--muted)}
+.step b{display:block;font-size:13px}
+.step .n{font-size:11px;color:var(--muted)}
+.step .out{display:block;margin-top:4px;font-size:12px}
+.step.ours{background:var(--ours-bg);border-color:transparent}
+.step.mock{background:var(--mock-bg);border-color:transparent}
+.step.bypass{outline:2px dashed var(--ok);outline-offset:-2px}
+/* use cases */
+.uc{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin:14px 0}
+.uc-head{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:baseline}
+.uc-id{font-weight:700;font-size:18px;color:var(--ours)}
+.uc.in .uc-id{color:var(--teal)}
+.uc-claim{font-size:16px;font-weight:600;flex:1 1 300px}
+.uc-body{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:16px;margin-top:10px}
+.uc.wide .uc-body{grid-template-columns:1fr}
+@media (max-width:820px){.uc-body{grid-template-columns:1fr}}
+.mechbox{border-left:4px solid var(--violet);background:var(--violet-bg);border-radius:0 8px 8px 0;padding:8px 12px;margin:0 0 10px}
+.mechbox .mname{font-weight:700;color:var(--violet)}
+.how ol{margin:4px 0;padding-left:20px}
+.how li{margin:3px 0}
+.proof{margin-top:8px;padding:8px 10px;border-radius:8px;background:var(--ok-bg);font-size:13px}
+.proof b{color:var(--ok)}
+.where{font-size:12px;color:var(--muted);margin-top:6px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+.tablebox{overflow-x:auto}
+.legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--muted);margin:6px 0}
+.sw{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-2px;margin-right:4px}
+.note{border:1px dashed var(--line);border-radius:8px;padding:8px 12px;font-size:13px;color:var(--muted);margin-top:10px}
+.themebtn{float:right;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:4px 10px;cursor:pointer;font-size:13px}
+.check{color:var(--ok);font-weight:700}
+.cross{color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+<button class="themebtn" id="themeBtn" type="button">Theme</button>
+<h1>Instagram Rate-Limiting: Design Map</h1>
+<p class="sub">A visual companion to <a href="TRD_RateLimiting.md">TRD_RateLimiting.md</a>. It covers the four components, the limits Meta enforces, the two protection pipelines, and each demo use case (2.1 to 3.3) with the mechanism that handles it. For what happened in a specific run, open the generated <code>reports\run-*.html</code>.</p>
+<nav class="toc">
+  <a href="#components">Components</a><a href="#levels">Meta's limits</a><a href="#outbound">Outbound pipeline</a>
+  <a href="#inbound">Inbound pipeline</a><a href="#uc-out">Use cases 2.x</a><a href="#uc-in">Use cases 3.x</a><a href="#algos">Algorithm map</a>
+</nav>
+
+<!-- ============================ COMPONENTS ============================ -->
+<h2 id="components">1. Components: two product APIs, two mocks</h2>
+<p class="sub">Naming convention: services that ship end in <b>Api</b>. Fake external parties end in <b>Mock</b> or <b>Simulator</b>, are used only in development, and never ship.</p>
+<div class="svgbox" id="archSvg"></div>
+<div class="grid g4" style="margin-top:12px">
+  <div class="card ours">
+    <span class="tag t-ours">Product</span><span class="tag t-soft">:5001</span>
+    <h3 style="margin-top:6px">InstagramSenderApi</h3>
+    <p class="sub">Outbound. Sends messages and media to Instagram for many tenants without exceeding Meta's limits.</p>
+    <ul class="tight">
+      <li>Bounded FIFO queue per tenant</li>
+      <li>Pre-flight gates: usage throttle, per-second pacing</li>
+      <li>Polly retry and circuit breaker, per tenant</li>
+      <li>Reads Meta's usage headers and error codes; persists blocks to SQL</li>
+    </ul>
+  </div>
+  <div class="card mock">
+    <span class="tag t-mock">Mock</span><span class="tag t-soft">:5020</span>
+    <h3 style="margin-top:6px">InstagramGraphMock</h3>
+    <p class="sub">Plays Meta's Graph API (<code>/v25.0/{tenant}/messages|media|media_publish</code>).</p>
+    <ul class="tight">
+      <li>Usage headers on every response</li>
+      <li>Rate-limit errors as <b>HTTP 400</b> plus a code, like the real API</li>
+      <li>Named scenarios under <code>/simulator/*</code></li>
+      <li>Replaced in production by <code>graph.facebook.com</code> through one config value</li>
+    </ul>
+  </div>
+  <div class="card ours">
+    <span class="tag t-ours">Product</span><span class="tag t-soft">:5002</span>
+    <h3 style="margin-top:6px">WebhookIngestApi</h3>
+    <p class="sub">Inbound. The public webhook receiver, hardened against floods and abuse.</p>
+    <ul class="tight">
+      <li>Fail-fast rule chain, cheapest check first</li>
+      <li>HMAC <code>X-Hub-Signature-256</code> checked before any counter</li>
+      <li>Sliding-window limits: global, per-IP, per-client</li>
+      <li>Concurrency cap, bypass for GET and health paths, observe-only mode</li>
+    </ul>
+  </div>
+  <div class="card mock">
+    <span class="tag t-mock">Mock</span><span class="tag t-soft">:5010</span>
+    <h3 style="margin-top:6px">WebhookTrafficSimulator</h3>
+    <p class="sub">Plays Instagram and attackers, firing traffic at the ingest API.</p>
+    <ul class="tight">
+      <li>8 scenarios: steady, burst, DDoS, global flood, oversized, bad signature, slow-loris, mixed</li>
+      <li>Returns status-code counts and observed rate-limit headers</li>
+      <li>In production, Meta itself calls the ingest API</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ============================ LEVELS ============================ -->
+<h2 id="levels">2. What Meta limits, and how we see each limit</h2>
+<p class="sub">Meta enforces four independent scopes. Staying within one says nothing about the others, which is why one counter cannot model them.</p>
+<div class="svgbox" id="levelsSvg"></div>
+<div class="note">The usage headers report <b>percentages only</b>. Meta's Instagram budget is <code>4800 x impressions</code> per 24 h, so the absolute ceiling is never known. That is why the 80% threshold is the main defence, not a fixed calls-per-hour quota.</div>
+
+<!-- ============================ OUTBOUND PIPELINE ============================ -->
+<h2 id="outbound">3. Outbound pipeline: InstagramSenderApi</h2>
+<p class="sub">Every job takes the same path. Steps 3 and 4 run before any HTTP call (prevention). Steps 5 and 6 react to what Meta answers (recovery).</p>
+<div class="flow">
+  <div class="step"><span class="n">1</span><b>POST /send</b>SendController validates<span class="out"><span class="tag t-ok">202</span> queued <span class="tag t-warn">429</span> queue full</span></div>
+  <div class="step"><span class="n">2</span><b>Tenant queue</b>Bounded <code>Channel</code>, 500, FIFO per tenant<span class="out">A paused tenant stalls only its own lane</span></div>
+  <div class="step ours"><span class="n">3</span><b>Block check + usage throttle</b><code>HeaderUsageThrottleGate</code><span class="out">blocked: hold, <b>no call</b><br>&ge;80%: sleep a computed delay</span></div>
+  <div class="step ours"><span class="n">4</span><b>Per-second gate</b><code>PerSecondDispatchGate</code><span class="out">Wait for a free slot in the tenant + call-class window</span></div>
+  <div class="step ours"><span class="n">5</span><b>Polly pipeline</b>Per tenant: retry, breaker, 15 s timeout<span class="out">Inline retry only when the wait is &le;2 min</span></div>
+  <div class="step ours"><span class="n">6</span><b>Rate-limit handler</b><code>InstagramRateLimitHandler</code><span class="out">Parse headers + error code, save usage/block to SQL</span></div>
+  <div class="step mock"><span class="n">7</span><b>Graph API</b>Mock :5020 or Meta</div>
+</div>
+<div class="svgbox" id="outcomeSvg"></div>
+
+<!-- ============================ INBOUND PIPELINE ============================ -->
+<h2 id="inbound">4. Inbound pipeline: WebhookIngestApi</h2>
+<p class="sub">The rules run in a fixed order (by the <code>Order</code> property, not by DI registration). The first denial ends the request, so cheap checks protect expensive ones and forged traffic never uses up a real client's quota.</p>
+<div class="svgbox" id="inboundSvg"></div>
+<div class="note">Every 429 carries <code>Retry-After</code>, <code>X-RateLimit-Limit</code>, <code>-Remaining</code> and <code>-Reset</code>. The counters increment as each rule passes, so a request denied at a later rule has already used its earlier slots (this explains the 47 + 13 = 60 split in 3.1).</div>
+
+<!-- ============================ OUTBOUND USE CASES ============================ -->
+<h2 id="uc-out">5. Outbound use cases (2.1 to 2.8)</h2>
+<div class="legend">
+  <span><span class="sw" style="background:var(--ok)"></span>sent / accepted</span>
+  <span><span class="sw" style="background:var(--bad)"></span>rejected by Meta</span>
+  <span><span class="sw" style="background:var(--warn)"></span>Meta's wait</span>
+  <span><span class="sw" style="background:var(--violet)"></span>our safety margin</span>
+  <span><span class="sw" style="background:var(--muted)"></span>held, no HTTP call</span>
+</div>
+<div id="ucOut"></div>
+
+<!-- ============================ INBOUND USE CASES ============================ -->
+<h2 id="uc-in">6. Inbound use cases (3.1 to 3.3)</h2>
+<div id="ucIn"></div>
+
+<!-- ============================ ALGORITHMS ============================ -->
+<h2 id="algos">7. Algorithm map vs the textbook five</h2>
+<p class="sub">The textbook list (token bucket, leaky bucket, fixed window, sliding-window log, sliding-window counter) assumes you <b>own</b> the limit. On the outbound side Meta owns it, so about half our mechanisms are not on that list.</p>
+<div class="tablebox"><table id="algoTable"></table></div>
+<div class="note">Not implemented, on purpose: the sliding-window counter and leaky-bucket strategies. Both are defensible for a single in-memory instance. When inbound moves to Redis across several instances, per-IP is where log memory grows with key count. The fix is a fourth strategy plus one config value, with no rule changes.</div>
+
+<p class="sub" style="margin-top:32px">The figures in the use-case panels come from the run report <code>reports
+un-20261008-170100.html</code> (all 9 asserted cases passed) and, for 2.4 and the 3.1 scenarios the runner does not execute, from <a href="DEMO.md">DEMO.md</a> section 4. The timing charts are illustrative and scaled to those figures.</p>
+</main>
+
+<script>
+(function(){
+/* ---------- theme toggle (per-viewer convenience only) ---------- */
+var root=document.documentElement;
+try{var saved=localStorage.getItem('trd-theme');if(saved)root.setAttribute('data-theme',saved);}catch(e){}
+document.getElementById('themeBtn').onclick=function(){
+  var dark=root.getAttribute('data-theme')==='dark'||(!root.getAttribute('data-theme')&&matchMedia('(prefers-color-scheme: dark)').matches);
+  var next=dark?'light':'dark';root.setAttribute('data-theme',next);
+  try{localStorage.setItem('trd-theme',next);}catch(e){}
+};
+
+/* ---------- tiny SVG helpers ---------- */
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function svg(w,h,body){
+  return '<svg viewBox="0 0 '+w+' '+h+'" xmlns="http://www.w3.org/2000/svg" role="img">'+
+    '<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" style="fill:var(--muted)"/></marker></defs>'+body+'</svg>';
+}
+function R(x,y,w,h,fill,o){o=o||{};return '<rect x="'+x+'" y="'+y+'" width="'+Math.max(0,w)+'" height="'+h+'" rx="'+(o.rx==null?6:o.rx)+'" style="fill:var(--'+fill+')'+(o.stroke?';stroke:var(--'+o.stroke+');stroke-width:'+(o.sw||1.5):'')+(o.dash?';stroke-dasharray:'+o.dash:'')+(o.op!=null?';opacity:'+o.op:'')+'"/>';}
+function T(x,y,s,o){o=o||{};return '<text x="'+x+'" y="'+y+'" font-size="'+(o.fs||12)+'"'+(o.anchor?' text-anchor="'+o.anchor+'"':'')+(o.bold?' font-weight="700"':'')+' class="'+(o.cls||'')+'"'+(o.color?' style="fill:var(--'+o.color+')"':'')+'>'+esc(s)+'</text>';}
+function L(x1,y1,x2,y2,color,o){o=o||{};return '<line x1="'+x1+'" y1="'+y1+'" x2="'+x2+'" y2="'+y2+'" style="stroke:var(--'+color+');stroke-width:'+(o.sw||1.5)+(o.dash?';stroke-dasharray:'+o.dash:'')+'"'+(o.arrow?' marker-end="url(#ah)"':'')+'/>';}
+function C(x,y,r,fill){return '<circle cx="'+x+'" cy="'+y+'" r="'+r+'" style="fill:var(--'+fill+')"/>';}
+function P(d,color,o){o=o||{};return '<path d="'+d+'" style="fill:none;stroke:var(--'+color+');stroke-width:'+(o.sw||2)+(o.dash?';stroke-dasharray:'+o.dash:'')+'"'+(o.arrow?' marker-end="url(#ah)"':'')+'/>';}
+function put(id,html){document.getElementById(id).innerHTML=html;}
+
+/* ---------- 1. architecture ---------- */
+(function(){
+  var b='';
+  function box(x,y,w,h,fill,stroke,title,sub,port){
+    return R(x,y,w,h,fill,{stroke:stroke,sw:2,rx:10})+T(x+w/2,y+24,title,{anchor:'middle',bold:true,fs:14})+
+      T(x+w/2,y+42,sub,{anchor:'middle',cls:'mut',fs:11})+(port?T(x+w/2,y+h-10,port,{anchor:'middle',fs:11,color:stroke,bold:true}):'');
+  }
+  b+=T(20,24,'OUTBOUND: we call Instagram',{bold:true,fs:13,color:'ours'});
+  b+=T(500,24,'INBOUND: Instagram calls us',{bold:true,fs:13,color:'teal'});
+  b+=L(480,10,480,330,'line',{dash:'4 4'});
+  // outbound
+  b+=box(20,44,120,70,'soft','line','Client','send jobs','');
+  b+=box(180,44,170,90,'ours-bg','ours','InstagramSenderApi','queue, gates, Polly',':5001  PRODUCT');
+  b+=box(180,214,170,90,'mock-bg','mock','InstagramGraphMock','fake Graph API v25.0',':5020  MOCK');
+  b+=L(140,79,178,79,'muted',{arrow:true})+T(159,100,'POST /send',{anchor:'middle',fs:10,cls:'mut'});
+  b+=L(265,136,265,212,'muted',{arrow:true})+T(258,176,'Graph calls',{anchor:'end',fs:10,cls:'mut'});
+  b+=P('M300,212 L300,136','muted',{sw:1.5,arrow:true,dash:'3 3'})+T(306,192,'headers + error codes',{fs:10,cls:'mut'});
+  b+=R(20,234,130,50,'soft',{stroke:'line',rx:8})+T(85,255,'SQL LocalDB',{anchor:'middle',bold:true,fs:12})+T(85,272,'TenantRateLimitState',{anchor:'middle',fs:10,cls:'mut'});
+  b+=P('M180,120 C120,150 90,190 85,232','muted',{sw:1.5,arrow:true});
+  b+=T(370,250,'prod:',{fs:10,cls:'mut'})+T(370,264,'graph.facebook.com',{fs:10,cls:'mut'})+T(370,278,'(one config value)',{fs:10,cls:'mut'});
+  // inbound
+  b+=box(500,44,180,90,'mock-bg','mock','WebhookTrafficSimulator','Instagram + attackers',':5010  MOCK');
+  b+=box(500,214,180,90,'ours-bg','ours','WebhookIngestApi','rule chain, limits',':5002  PRODUCT');
+  b+=L(590,136,590,212,'muted',{arrow:true})+T(583,176,'POST /webhook',{anchor:'end',fs:10,cls:'mut'});
+  b+=P('M640,212 L640,136','muted',{sw:1.5,arrow:true,dash:'3 3'})+T(646,192,'202 / 401 / 413 / 429',{fs:10,cls:'mut'});
+  b+=R(720,224,140,70,'soft',{stroke:'line',rx:8})+T(790,248,'Webhook handler',{anchor:'middle',bold:true,fs:12})+T(790,266,'only for requests',{anchor:'middle',fs:10,cls:'mut'})+T(790,280,'that pass every rule',{anchor:'middle',fs:10,cls:'mut'});
+  b+=L(682,259,718,259,'muted',{arrow:true});
+  b+=T(700,80,'prod: Meta calls',{fs:10,cls:'mut'})+T(700,94,'our public endpoint',{fs:10,cls:'mut'});
+  put('archSvg',svg(880,320,b));
+})();
+
+/* ---------- 2. Meta levels ---------- */
+(function(){
+  var rows=[
+    ['L1','App','one budget for ALL tenants','X-App-Usage (call_count, total_time, total_cputime)','4, 613, 613/1996','row app:{FbAppId}','ours'],
+    ['L2','Instagram account (BUC)','per account, 24 h window','X-Business-Use-Case-Usage + estimated_time_to_regain_access (min)','80002, 80006','tenant row','violet'],
+    ['L3','User / Page token','per token; folds into L2 here','same BUC header','17, 32, 80001','tenant row','teal'],
+    ['L4','Per-second burst','per account AND per call class','none: no header at all','none (surfaces as 17)','PerSecondDispatchGate','warn']
+  ];
+  var b='',y=12;
+  b+=T(14,y+12,'Level',{cls:'mut',fs:11,bold:true})+T(230,y+12,'Signal Meta gives us',{cls:'mut',fs:11,bold:true})+T(560,y+12,'Error codes',{cls:'mut',fs:11,bold:true})+T(700,y+12,'Where we track it',{cls:'mut',fs:11,bold:true});
+  y+=22;
+  rows.forEach(function(r){
+    b+=R(10,y,870,54,'soft',{rx:8});
+    b+=R(10,y,6,54,r[6],{rx:2});
+    b+=T(26,y+22,r[0],{bold:true,fs:15,color:r[6]})+T(60,y+22,r[1],{bold:true,fs:13})+T(60,y+40,r[2],{fs:11,cls:'mut'});
+    b+=T(230,y+22,r[3].length>44?r[3].slice(0,r[3].indexOf(' ',30)):r[3],{fs:11});
+    if(r[3].length>44)b+=T(230,y+38,r[3].slice(r[3].indexOf(' ',30)+1),{fs:11});
+    b+=T(560,y+22,r[4],{fs:12,bold:true});
+    b+=T(700,y+22,r[5],{fs:12});
+    y+=60;
+  });
+  b+=T(14,y+14,'Per-second caps (L4): text/links/reactions 100/s, audio/video 10/s, Conversations API 2/s, live private replies 100/s.',{fs:11,cls:'mut'});
+  put('levelsSvg',svg(890,y+24,b));
+})();
+
+/* ---------- 3. outbound outcomes ---------- */
+(function(){
+  var b='';
+  b+=T(10,18,'What happens with Meta\'s answer (step 6, then the queue)',{bold:true,fs:13});
+  var o=[
+    ['ok','Success','clear the account block; next job','ok-bg'],
+    ['warn','Rate-limited, wait ≤2 min','Polly retries inline after the wait','warn-bg'],
+    ['bad','Rate-limited, wait >2 min','persist block = ETA + 1 min; pause tenant; re-queue (max 5)','bad-bg'],
+    ['muted','Already blocked','guard throws before any call; sleep the remainder; re-queue','soft'],
+    ['muted','Other error (404, 500)','keep existing state; drop with error log','soft']
+  ];
+  var x=10;
+  o.forEach(function(r){
+    b+=R(x,32,168,92,r[3],{rx:8,stroke:r[0],sw:1.2});
+    b+=T(x+10,54,r[1],{bold:true,fs:12,color:r[0]==='muted'?null:r[0]});
+    var words=r[2].split(' '),line='',ly=74;
+    words.forEach(function(w){if((line+' '+w).length>26){b+=T(x+10,ly,line.trim(),{fs:11});ly+=15;line=w;}else line+=' '+w;});
+    b+=T(x+10,ly,line.trim(),{fs:11});
+    x+=176;
+  });
+  b+=T(10,146,'Rule: only a success clears an account block, and nothing clears an app block early. A 500 with no headers never unblocks a tenant.',{fs:11,cls:'mut'});
+  put('outcomeSvg',svg(890,156,b));
+})();
+
+/* ---------- 4. inbound rule chain ---------- */
+function inboundChain(highlight){
+  // highlight: {bypass:true} draws GET/health lane
+  var rules=[
+    ['GET or excluded path?','bypass','ok'],
+    ['Blocked IP','403','bad'],
+    ['Allowed IP','skip rest','ok'],
+    ['Body size','411 / 413','bad'],
+    ['HMAC signature','401','bad'],
+    ['Global 1000/min +20','429','warn'],
+    ['Per-IP 60/min','429','warn'],
+    ['Per-client 100/min +20','429','warn'],
+    ['Concurrency 10','429','warn']
+  ];
+  var b='',w=92,gap=8,x0=10,y=40;
+  b+=T(x0,20,'request',{fs:11,cls:'mut'});
+  rules.forEach(function(r,i){
+    var x=x0+i*(w+gap);
+    var isB=i===0;
+    b+=R(x,y,w,58,isB?'ok-bg':'soft',{rx:8,stroke:isB?'ok':'line',sw:isB?1.5:1});
+    var parts=r[0].split(' '),l1='',l2='';
+    parts.forEach(function(p){if((l1+' '+p).trim().length<=12&&!l2)l1=(l1+' '+p).trim();else l2=(l2+' '+p).trim();});
+    b+=T(x+w/2,y+22,l1,{anchor:'middle',fs:11,bold:true})+(l2?T(x+w/2,y+37,l2,{anchor:'middle',fs:11,bold:true}):'');
+    b+=L(x+w/2,y+60,x+w/2,y+84,r[2],{arrow:true});
+    b+=T(x+w/2,y+100,r[1],{anchor:'middle',fs:11,bold:true,color:r[2]});
+    if(i<rules.length-1)b+=L(x+w,y+29,x+w+gap,y+29,'muted',{sw:1.2});
+  });
+  var xe=x0+rules.length*(w+gap);
+  b+=L(xe-gap,y+29,xe+6,y+29,'muted',{arrow:true});
+  b+=R(xe+8,y,64,58,'ok-bg',{rx:8,stroke:'ok'})+T(xe+40,y+26,'handler',{anchor:'middle',fs:11,bold:true})+T(xe+40,y+42,'202',{anchor:'middle',fs:12,bold:true,color:'ok'});
+  if(highlight&&highlight.bypass){
+    b+=P('M'+(x0+w/2)+','+(y-2)+' C'+(x0+w/2)+','+(y-30)+' '+(xe+40)+','+(y-30)+' '+(xe+40)+','+(y-2),'ok',{sw:2.5,arrow:true,dash:'6 4'});
+    b+=T((x0+xe)/2,y-24,'GET /webhook (Meta hub.challenge) and POST /health skip every rule',{anchor:'middle',fs:11,bold:true,color:'ok',cls:'halo'});
+  }
+  b+=T(x0+w+gap,y+128,'cheap checks',{fs:10,cls:'mut'})+L(x0+w+gap+72,y+124,x0+4*(w+gap)-10,y+124,'line',{arrow:true});
+  b+=T(x0+5*(w+gap),y+128,'counters (sliding-window log)',{fs:10,cls:'mut'})+L(x0+5*(w+gap)+160,y+124,x0+8*(w+gap)-10,y+124,'line',{arrow:true});
+  b+=T(x0+8*(w+gap),y+128,'semaphore',{fs:10,cls:'mut'});
+  return svg(xe+80,y+140,b);
+}
+put('inboundSvg',inboundChain({bypass:false}));
+
+/* ---------- reusable chart builders ---------- */
+// dots on a time axis; rows: [{label, times:[s], color, flag:{from,to,count,color}}]
+function dotTimeline(rows,maxT,opt){
+  opt=opt||{};
+  var W=560,left=118,right=16,rowH=46,top=18,w=W-left-right;
+  var H=top+rows.length*rowH+30,b='';
+  function X(t){return left+t/maxT*w;}
+  for(var s=0;s<=maxT;s++){b+=L(X(s),top-6,X(s),H-26,'line',{sw:1,dash:'2 3'})+T(X(s),H-10,s+' s',{anchor:'middle',fs:10,cls:'mut'});}
+  rows.forEach(function(r,i){
+    var y=top+i*rowH+rowH/2;
+    if(r.flag){b+=R(X(r.flag.from),y-17,X(r.flag.to)-X(r.flag.from),34,r.flag.color+'-bg',{rx:6,stroke:r.flag.color,sw:1.2});}
+    b+=T(8,y-2,r.label,{fs:11,bold:true})+(r.sub?T(8,y+12,r.sub,{fs:10,cls:'mut'}):'');
+    b+=L(left,y,W-right,y,'line',{sw:1});
+    var seen={};
+    r.times.forEach(function(t){var k=t.toFixed(3);seen[k]=(seen[k]||0)+1;var dy=(seen[k]-1)*-5;b+=C(X(t),y+dy+(seen[k]>1?0:0),4.2,r.colorOf?r.colorOf(t):r.color);});
+    if(r.flag)b+=T(X(r.flag.to)+4,y-8,r.flag.text,{fs:11,bold:true,color:r.flag.color,cls:'halo'});
+  });
+  return svg(W,H,b);
+}
+// horizontal segmented bar(s): rows:[{label, segs:[{v,color,text}]}], unit label
+function segBars(rows,maxV,unit,opt){
+  opt=opt||{};
+  var W=560,left=120,right=14,rowH=40,top=10,w=W-left-right,H=top+rows.length*rowH+26,b='';
+  function X(v){return left+v/maxV*w;}
+  var step=opt.step||Math.ceil(maxV/6);
+  for(var v=0;v<=maxV+1e-9;v+=step){b+=L(X(v),top,X(v),H-22,'line',{sw:1,dash:'2 3'})+T(X(v),H-8,v+unit,{anchor:'middle',fs:10,cls:'mut'});}
+  rows.forEach(function(r,i){
+    var y=top+i*rowH+6,acc=r.start||0;
+    b+=T(8,y+17,r.label,{fs:11,bold:true})+(r.sub?T(8,y+30,r.sub,{fs:10,cls:'mut'}):'');
+    r.segs.forEach(function(s){
+      b+=R(X(acc),y,X(acc+s.v)-X(acc),24,s.color,{rx:3,op:s.op});
+      if(s.text&&X(acc+s.v)-X(acc)>28)b+=T((X(acc)+X(acc+s.v))/2,y+16,s.text,{anchor:'middle',fs:10,bold:true,color:'panel'});
+      acc+=s.v;
+    });
+    if(r.end)b+=T(X(acc)+5,y+16,r.end,{fs:11,bold:true,cls:'halo'});
+  });
+  return svg(W,H,b);
+}
+
+/* ---------- 2.1 visual: token bucket vs sliding log ---------- */
+function v21(){
+  // illustrative: 4/s gate, 15 jobs queued at t=0, each call ~40 ms of work
+  var tb=[0,0.04,0.08,0.12,0.25,0.5,0.75,1.0,1.25,1.5,1.75,2.0,2.25,2.5,2.75];
+  var sw=[0,0.04,0.08,0.12,1.0,1.04,1.08,1.12,2.0,2.04,2.08,2.12,3.0,3.04,3.08];
+  return dotTimeline([
+    {label:'Old: token bucket',sub:'capacity 4, refill 4/s',times:tb,colorOf:function(t){return t<=0.75&&t>=0.25?'bad':'ok';},
+     flag:{from:0,to:1,color:'bad',text:'7 in 1 s > mock cap 5'}},
+    {label:'Now: sliding log',sub:'last 4 send times',times:sw,color:'ok',
+     flag:{from:0.12,to:1.12,color:'ok',text:'never > 4 in any 1 s'}}
+  ],3.4);
+}
+/* ---------- 2.3 / 2.4 visual: throttle curve ---------- */
+function throttleCurve(points){
+  var W=560,H=230,left=56,right=16,top=16,bottom=36,w=W-left-right,h=H-top-bottom,b='';
+  function X(u){return left+(u-0)/100*w;}
+  function Y(ms){return top+h-Math.min(ms,62000)/62000*h;}
+  [0,15000,30000,45000,60000].forEach(function(ms){b+=L(left,Y(ms),W-right,Y(ms),'line',{sw:1,dash:'2 3'})+T(left-6,Y(ms)+4,(ms/1000)+' s',{anchor:'end',fs:10,cls:'mut'});});
+  [0,20,40,60,80,100].forEach(function(u){b+=T(X(u),H-18,u+'%',{anchor:'middle',fs:10,cls:'mut'});});
+  b+=T(left+w/2,H-4,'usage = max(tenant %, app %)',{anchor:'middle',fs:10,cls:'mut'});
+  b+=R(X(0),top,X(80)-X(0),h,'ok-bg',{rx:0,op:.6})+T(X(40),top+16,'full speed (no delay)',{anchor:'middle',fs:11,bold:true,color:'ok'});
+  b+=L(X(80),top,X(80),top+h,'warn',{dash:'5 4'})+T(X(80)-4,top+34,'80% threshold',{anchor:'end',fs:10,bold:true,color:'warn'});
+  var d='';
+  for(var u=80;u<=99.9;u+=0.1){var ms=Math.max(200,Math.min(60000,3600000/((100-u)*48)));d+=(d?' L':'M')+X(u).toFixed(1)+','+Y(ms).toFixed(1);}
+  b+=P(d,'violet',{sw:2.5});
+  b+=L(X(80),Y(60000),W-right,Y(60000),'violet',{dash:'3 3',sw:1})+T(W-right,Y(60000)-5,'clamp 60 s',{anchor:'end',fs:10,color:'violet'});
+  (points||[]).forEach(function(p){b+=C(X(p.u),Y(p.ms),5,p.color||'ours')+T(X(p.u)+(p.left?-8:8),Y(p.ms)+(p.dy||4),p.text,{fs:11,bold:true,anchor:p.left?'end':'start',cls:'halo'});});
+  return svg(W,H,b);
+}
+/* ---------- 2.3 gauges ---------- */
+function gauges(rows){
+  var W=560,left=150,right=50,rowH=36,top=10,w=W-left-right,H=top+rows.length*rowH+24,b='';
+  function X(p){return left+p/100*w;}
+  rows.forEach(function(r,i){
+    var y=top+i*rowH;
+    b+=T(8,y+17,r.label,{fs:11,bold:true});
+    b+=R(X(0),y+4,w,20,'soft',{rx:4})+R(X(0),y+4,X(r.v)-X(0),20,r.color,{rx:4});
+    b+=T(X(r.v)+6,y+19,r.v+'%',{fs:12,bold:true});
+  });
+  b+=L(X(80),top-2,X(80),H-20,'warn',{dash:'5 4'})+T(X(80),H-6,'80%',{anchor:'middle',fs:10,bold:true,color:'warn'});
+  return svg(W,H,b);
+}
+/* ---------- 2.8 lanes ---------- */
+function v28(){
+  var text=[],media=[],conv=[];
+  for(var i=0;i<20;i++)text.push(i*0.012);
+  for(i=0;i<10;i++)media.push(i*0.03);
+  for(i=0;i<10;i++)media.push(1.0+i*0.03);
+  conv=[0,0.03,0.5,1.0,1.5,2.0];
+  return dotTimeline([
+    {label:'Text 100/s',sub:'20 sends, 0 waits',times:text,color:'ok',flag:{from:0,to:0.3,color:'ok',text:'all at once'}},
+    {label:'Audio/video 10/s',sub:'20 sends, 2 waits',times:media,color:'ok',flag:{from:0.3,to:1.0,color:'warn',text:'11th waits for slot'}},
+    {label:'Conversations 2/s',sub:'6 calls, 4 waits',times:conv,color:'ok'}
+  ],2.4);
+}
+/* ---------- 2.7 lanes ---------- */
+function v27(){
+  var W=560,left=130,right=14,top=14,rowH=40,w=W-left-right,maxM=8,b='';
+  function X(m){return left+m/maxM*w;}
+  var H=top+3*rowH+30;
+  for(var m=0;m<=maxM;m++){b+=L(X(m),top,X(m),H-24,'line',{sw:1,dash:'2 3'})+T(X(m),H-8,m+' min',{anchor:'middle',fs:10,cls:'mut'});}
+  var y=top;
+  b+=T(8,y+17,'app:{FbAppId}',{fs:11,bold:true})+T(8,y+30,'shared app row',{fs:10,cls:'mut'});
+  b+=R(X(0.1),y+4,X(6.1)-X(0.1),22,'warn',{rx:3})+T((X(0.1)+X(6.1))/2,y+19,'BLOCKED (Meta wait)',{anchor:'middle',fs:10,bold:true,color:'panel'});
+  b+=R(X(6.1),y+4,X(7.1)-X(6.1),22,'violet',{rx:3})+T((X(6.1)+X(7.1))/2,y+19,'+1',{anchor:'middle',fs:10,bold:true,color:'panel'});
+  y+=rowH;
+  b+=T(8,y+17,'tenant-guilty',{fs:11,bold:true})+T(8,y+30,'got code 4',{fs:10,cls:'mut'});
+  b+=C(X(0.1),y+15,6,'bad')+T(X(0.1)+10,y+19,'code 4 → block goes to APP row; own row stays 20%, unblocked',{fs:10,cls:'halo'});
+  y+=rowH;
+  b+=T(8,y+17,'tenant-innocent',{fs:11,bold:true})+T(8,y+30,'never called',{fs:10,cls:'mut'});
+  b+=R(X(0.2),y+4,X(7.1)-X(0.2),22,'muted',{rx:3,op:.55})+T((X(0.2)+X(7.1))/2,y+19,'held 00:06:54, no HTTP call',{anchor:'middle',fs:10,bold:true,color:'panel'});
+  b+=C(X(7.15),y+15,5,'ok');
+  return svg(W,H,b);
+}
+/* ---------- 3.x stacked result bars ---------- */
+function resultBars(rows,maxV){
+  return segBars(rows,maxV,'',{step:maxV>500?200:(maxV>100?50:10)});
+}
+
+/* ---------- use-case data ---------- */
+var OUT=[
+ {id:'2.1',claim:'We pace ourselves under Meta\'s per-second cap, so Instagram never has to say no.',
+  mech:'Sliding-window log (reservation style)',tags:[['Prevention','t-ok'],['L4','t-warn'],['PerSecondRateLimit','t-mock']],
+  how:['Keep the last N send times for each <code>{tenant}|{call class}</code>.','Next slot = max(now, oldest + 1 s). The gate returns a <b>wait</b>, not a rejection, because rejecting our own send is pointless.','Up to N calls can still leave at once, but never more than N in <b>any</b> one-second span, including right after a cold start.'],
+  params:'Gate 4/s in the demo, mock cap 5/s, 15 jobs',
+  proof:'15/15 sent, 0 rate-limit errors; 7 gate waits; busiest one-second span 4 at the gate (2026-10-08). Counted at the HTTP log line instead, the span can read 5: that line trails the gate by a few ms, which is why the gate runs one below the cap of the mock.',
+  where:'PerSecondDispatchGate.cs, DispatchClassifier',
+  vis:function(){return '<p class="sub">Why the gate changed (Oct 2026): a full token bucket refilling at the cap lets capacity + rate &minus; 1 calls through in the first second.</p>'+v21();}},
+ {id:'2.2',claim:'A 429 with an unrecognised error code is still obeyed, using the Retry-After header alone.',
+  mech:'Server-directed backoff (Retry-After) + persisted block window',tags:[['Recovery','t-warn'],['RetryAfter429','t-mock']],
+  how:['The mock answers <b>429 + Retry-After: 90</b> with error code 1, which is deliberately not a rate-limit code.','The handler rounds the header up to whole minutes (minimum 1), so 90 s becomes 2 min, then saves <code>BlockedUntilUtc</code> = now + 2 min + 1-minute buffer.','The queue pauses the tenant and re-queues the job, so nothing is lost and no call is made while blocked.'],
+  params:'Retry-After 90 s, buffer +1 min',
+  proof:'Log: <code>Retry-After 2 min</code> → <code>blocked for 2 min (+ 1 min buffer)</code> → <code>pausing 0:03:00, then re-queuing</code>. SQL <code>BlockedUntilUtc</code> = now + 3 min; no inline retry (2026-10-08).',
+  where:'InstagramRateLimitHandler, SendQueueWorker',
+  vis:function(){return segBars([
+    {label:'Meta says',sub:'Retry-After 90 s',segs:[{v:1.5,color:'warn',text:'90 s'}]},
+    {label:'We wait',sub:'rounded + buffer',segs:[{v:2,color:'warn',text:'2 min'},{v:1,color:'violet',text:'+1'}],end:'resume'},
+    {label:'Tenant queue',sub:'paused, no calls',segs:[{v:3,color:'muted',text:'paused, job kept',op:.55}],end:'re-queued'}
+  ],4,' min',{step:1});}},
+ {id:'2.3',claim:'One quota is shared by every account. A fresh account\'s first call is already throttled, yet each row keeps its own percentage.',
+  mech:'Usage-percentage throttle over a shared budget (two-level state)',tags:[['Prevention','t-ok'],['L1 + L2','t-ours'],['SharedAppBudget','t-mock']],
+  how:['<code>X-App-Usage</code> is stored only on the shared <code>app:{FbAppId}</code> row; BUC usage only on the account row. They are never merged.','Before each call: usage = max(tenant %, app %). Below 80%, no delay.','At 80% or above: delay = 3,600,000 / (remaining % &times; 48) ms, clamped to 200 ms to 60 s, which spreads the rest of the quota out.'],
+  params:'App 92%, tenant-light 5%',
+  proof:'Fresh tenant\'s first send delayed <b>9,375 ms</b> = 3,600,000 / (8 &times; 48). SQL: app row 92%, tenant-heavy 90%, tenant-light 5% (tenant-light read 92% before the level fix) (2026-10-08).',
+  where:'HeaderUsageThrottleGate, TenantRateLimitService, InstagramRateLimitHandler',
+  vis:function(){return gauges([
+      {label:'app:{FbAppId}',v:92,color:'bad'},
+      {label:'tenant-heavy (own BUC)',v:90,color:'warn'},
+      {label:'tenant-light (own BUC)',v:5,color:'ok'},
+      {label:'used for throttle = max',v:92,color:'violet'}])+
+    throttleCurve([{u:92,ms:9375,text:'92% → 9,375 ms',color:'bad',left:true}]);}},
+ {id:'2.4',claim:'Classic scenarios: gradual approach, sudden block, flapping, multi-tenant mix, recovery.',
+  mech:'Both outbound layers together (watch only)',tags:[['Prevention + recovery','t-soft'],['GradualApproach','t-mock']],
+  how:['Usage climbs with every call; the delay stays at zero until 80%.','From 80%, delays grow along the curve (3.75 s at 80%, 15 s at 95%).','At 100% the mock returns code 80001 with a 5-minute ETA; the block is saved with +1 min and the job is re-queued.'],
+  params:'25 jobs',
+  proof:'Full speed to 80%; delays 3.75 s → 15 s; call 20 got 80001, ETA 5 min; block persisted, job re-queued, not dropped (2026-07-06).',
+  where:'Same components as 2.3 and 2.5',
+  vis:function(){return throttleCurve([{u:80,ms:3750,text:'80% → 3.75 s',color:'ok',left:true,dy:-6},{u:95,ms:15000,text:'95% → 15 s',color:'warn',left:true}]);}},
+ {id:'2.5',claim:'Instagram\'s real BUC code 80002 arrives on HTTP 400 with no header; only the code list can classify it.',
+  mech:'Error-code classification → account-scoped block window',tags:[['Recovery','t-warn'],['L2','t-vio'],['InstagramBucBlock','t-mock']],
+  how:['Meta signals limits as <b>HTTP 400 + error code</b>, not 429. The status code alone would look like a generic failure.','The code is checked against one list: <code>[4, 17, 32, 613, 80001, 80002, 80006]</code>. 80002 is account-level.','<code>estimated_time_to_regain_access</code> is read in <b>minutes</b>; wait = max(body ETA, BUC-header ETA, 1-min floor) + 1 min, on the tenant row only.'],
+  params:'code 80002, ETA 8 min',
+  proof:'<code>code=80002, level=account, retryAfter=8min</code> → <code>pausing 0:09:00</code>; tenant-buc row blocked 9 min, app row not blocked (2026-10-08).',
+  where:'InstagramRateLimitHandler (code list), InstagramResiliencePipeline',
+  vis:function(){return classify('80002','account','tenant row')+segBars([
+    {label:'tenant-buc',sub:'its own row',segs:[{v:8,color:'warn',text:'Meta ETA 8 min'},{v:1,color:'violet',text:'+1'}],end:'resume'},
+    {label:'other tenants',sub:'unaffected',segs:[{v:9,color:'ok',text:'sending normally',op:.8}]}
+  ],10,' min',{step:2});}},
+ {id:'2.6',claim:'613 / subcode 1996 gives no wait time at all, so we supply a 15-minute floor, and it is app-scoped.',
+  mech:'Subcode-specific backoff floor → app-scoped block window',tags:[['Recovery','t-warn'],['L1','t-ours'],['CustomRateLimit613','t-mock']],
+  how:['<code>error_subcode</code> is parsed. 613/1996 means Meta flagged our <b>traffic shape</b>, not a quota reset.','No ETA arrives. The default 1-minute minimum would send us straight back into the flag, so 1996 gets a 15-minute minimum.','613 is an app-level code, so the block lands on the app row.'],
+  params:'code 613, subcode 1996, no ETA',
+  proof:'<code>code=613, subcode=1996, level=app, retryAfter=15min</code> → <code>app:local-dev-app</code> blocked 15 + 1 = 16 min; tenant-613 row not blocked (2026-10-08).',
+  where:'InstagramErrorResponse (subcode), InstagramRateLimitHandler',
+  vis:function(){return classify('613 / 1996','app','app row')+segBars([
+    {label:'Default rule',sub:'no ETA → 1 min',segs:[{v:1,color:'bad',text:''}],end:'too short: re-flagged'},
+    {label:'1996 rule',sub:'15-min minimum',segs:[{v:15,color:'warn',text:'15 min minimum'},{v:1,color:'violet',text:'+1'}],end:'resume'}
+  ],20,' min',{step:5});}},
+ {id:'2.7',claim:'An app-level ban stops every account, including one that never called.',
+  mech:'App-wide block (shared circuit) with asymmetric clearing',tags:[['Recovery','t-warn'],['L1','t-ours'],['AppLevelBlock','t-mock']],
+  how:['Code 4 is in <code>AppLevelErrorCodes [4, 613]</code>, so the block is written to <code>app:{FbAppId}</code>, not to the account that received it.','The guard checks the app row for <b>every</b> tenant, so any tenant is held before it makes a call.','A success never clears an app block (one account recovering does not prove the shared budget did); it ends only at <code>BlockedUntilUtc</code>.'],
+  params:'code 4 on tenant-guilty; tenant-innocent sends afterwards',
+  proof:'App row blocked; tenant-guilty unblocked at its own 20%; tenant-innocent <code>held by an APP-level block for 00:06:54</code> with no HTTP call. App block 6 + 1 = 7 min (2026-10-08).',
+  where:'InstagramRateLimitHandler (AppLevelErrorCodes), TenantRateLimitService',
+  vis:v27},
+ {id:'2.8',claim:'Per-second caps differ by call class on the same endpoint.',
+  mech:'Payload-aware classifier + one sliding-window log per class',tags:[['Prevention','t-ok'],['L4','t-warn'],['3 bursts','t-mock']],
+  how:['<code>DispatchClassifier</code> reads the endpoint <b>and</b> <code>message.attachment.type</code>: text and video both post to <code>/messages</code>.','Each class gets its own window per tenant: text 100/s, audio/video 10/s, Conversations 2/s. Anything unknown gets the tightest cap.','Windows are independent: 100 texts and 2 Conversations calls in the same second are both allowed.'],
+  params:'20 text, 20 video, 6 /conversations',
+  proof:'Text: 0 waits. Video: 2 waits at 10/s (longest 858 ms). Conversations: 4 waits at 2/s (2026-10-08).',
+  where:'DispatchClassifier, PerSecondDispatchGate',
+  vis:v28}
+];
+function classify(code,level,target){
+  var W=560,H=86,b='';
+  var steps=[['HTTP 400','status alone: generic','soft'],['code '+code,'in the rate-limit list?','violet-bg'],['level = '+level,'app codes: 4, 613','warn-bg'],['block → '+target,'ETA (or minimum) + 1 min','bad-bg']];
+  steps.forEach(function(s,i){var x=8+i*138;b+=R(x,10,122,56,s[2],{rx:8,stroke:'line',sw:1})+T(x+61,32,s[0],{anchor:'middle',fs:12,bold:true})+T(x+61,50,s[1],{anchor:'middle',fs:10,cls:'mut'});if(i<3)b+=L(x+123,38,x+136,38,'muted',{arrow:true});});
+  return svg(W,H,b);
+}
+
+var IN=[
+ {id:'3.1',claim:'Attack traffic (flood, DDoS, oversized, bad signature, slow-loris) is bounded.',
+  mech:'Fail-fast rule pipeline + sliding-window log counters + concurrency semaphore',tags:[['Enforce','t-bad'],['8 scenarios','t-mock']],
+  how:['Each scenario is stopped by a different rule: bad signatures at HMAC, big bodies at the size guard, floods at the counters.','Global, per-IP and per-client limits are <b>sliding-window logs</b> (a queue of timestamps per key), so an attacker cannot double up at a window boundary.','Slow-loris satisfies every rate limit; only the <b>concurrency semaphore</b> (10 held open per client) stops it.'],
+  params:'Per-IP 60/min (no burst), global 1000/min +20, per-client 100/min +20, concurrency 10',
+  proof:'BurstSingleIp, 200 requests (2026-10-08): 47 × 202, 13 × 429 concurrency, 140 × 429 per-IP. 47 + 13 = 60, the per-IP limit, because the counters run before the concurrency rule. From 2026-07-06: InvalidSignature 30 × 401 with counters untouched; SlowLoris 15 → 10 + 5 × 429.',
+  where:'InboundRateLimitPipeline, CountedLimitRule, SlidingWindowStrategy, ConcurrencyRule, HmacSignatureRule',
+  vis:function(){return resultBars([
+    {label:'BurstSingleIp',sub:'red 13 = concurrency',segs:[{v:47,color:'ok',text:'47 × 202'},{v:13,color:'bad',text:'13'},{v:140,color:'warn',text:'140 × 429 per-IP'}]},
+    {label:'InvalidSignature',sub:'30 requests',segs:[{v:30,color:'bad',text:'30 × 401'}],end:'no counter used'},
+    {label:'SlowLoris',sub:'15 held open',segs:[{v:10,color:'ok',text:'10'},{v:5,color:'warn',text:'5'}],end:'429 concurrency'}
+  ],200);}},
+ {id:'3.2',wide:true,claim:'Health checks and Meta\'s GET handshake are never blocked, even mid-attack.',
+  mech:'Bypass predicate ahead of the pipeline',tags:[['Meta-safety','t-ok'],['ExcludedPaths','t-soft']],
+  how:['Meta verifies the subscription with <b>GET</b> <code>hub.challenge</code>. Throttling it breaks re-verification and can get the subscription disabled.','<code>IsBypassed</code> runs first: any GET, and any path in <code>ExcludedPaths</code> (such as <code>/health</code>), skips every rule.','So a saturated per-IP window cannot take down health probes or the handshake.'],
+  params:'Per-IP window already full',
+  proof:'POST /health → 200 during a saturated window, unsigned; GET routed normally (404 = it reached routing, not the limiter).',
+  where:'InboundRateLimitMiddleware (IsBypassed), options ExcludedPaths',
+  vis:function(){return inboundChain({bypass:true});}},
+ {id:'3.3',claim:'Observe-only computes every denial and blocks nothing.',
+  mech:'Shadow mode (dry run): full evaluation, enforcement skipped',tags:[['Rollout','t-vio'],['ObserveOnly','t-soft']],
+  how:['Every rule runs exactly as in enforce mode, with the same counters and order.','When a rule would deny, the request still passes and a "would deny" line is logged with the reason.','This is the rollout step: measure real traffic before choosing limits, then switch to enforce.'],
+  params:'ObserveOnly = true, same flood as 3.1',
+  proof:'200 × 202, 0 rejected; 153 <code>OBSERVE ONLY: would deny</code> lines (13 concurrency + 140 per-IP), the same split 3.1 enforced (2026-10-08).',
+  where:'InboundRateLimitMiddleware, options ObserveOnly',
+  vis:function(){return resultBars([
+    {label:'Enforce (3.1)',sub:'red = concurrency',segs:[{v:47,color:'ok',text:'202'},{v:13,color:'bad',text:''},{v:140,color:'warn',text:'429 denied'}]},
+    {label:'Observe (3.3)',sub:'200 requests',segs:[{v:200,color:'ok',text:'all 202 accepted'}]},
+    {label:'  logged only',sub:'153 "would deny"',segs:[{v:47,color:'soft',text:''},{v:13,color:'bad',text:'',op:.45},{v:140,color:'warn',text:'would-deny log lines',op:.45}]}
+  ],200);}}
+];
+
+function card(u,inbound){
+  var tags=u.tags.map(function(t){return '<span class="tag '+t[1]+'">'+t[0]+'</span>';}).join('');
+  return '<section class="uc'+(inbound?' in':'')+(u.wide?' wide':'')+'" id="uc'+u.id.replace('.','-')+'">'+
+    '<div class="uc-head"><span class="uc-id">'+u.id+'</span><span class="uc-claim">'+u.claim+'</span><span>'+tags+'</span></div>'+
+    '<div class="uc-body"><div class="vis">'+u.vis()+'</div>'+
+    '<div><div class="mechbox"><div class="sub" style="font-size:11px;text-transform:uppercase;letter-spacing:.04em">Mechanism</div><div class="mname">'+u.mech+'</div></div>'+
+    '<div class="how"><b>How it handles it</b><ol>'+u.how.map(function(h){return '<li>'+h+'</li>';}).join('')+'</ol></div>'+
+    '<div class="sub" style="font-size:13px"><b>Setup:</b> '+u.params+'</div>'+
+    '<div class="proof"><b>Verified:</b> '+u.proof+'</div>'+
+    '<div class="where">Code: '+u.where+'</div></div></div></section>';
+}
+put('ucOut',OUT.map(function(u){return card(u,false);}).join(''));
+put('ucIn',IN.map(function(u){return card(u,true);}).join(''));
+
+/* ---------- 7. algorithm map ---------- */
+(function(){
+  var cols=['Token bucket','Leaky bucket','Fixed window','Sliding log','Sliding counter','Not in the five'];
+  var rows=[
+    ['2.1, 2.8','Out','Per-second cap per tenant + class',3,'Reservation shaper: returns a wait, not a rejection'],
+    ['2.3, 2.4','Out','Usage % throttle',5,'Adaptive feedback on Meta\'s own usage headers'],
+    ['2.2, 2.5, 2.6, 2.7','Out','Rate-limit responses',5,'Error-code classification, blocks scoped by level, Polly backoff with jitter'],
+    ['all out','Out','Work admission',1,'Bounded queue per tenant = the queue half of a leaky bucket'],
+    ['3.1','In','Global / per-IP / per-client',3,'Queue of timestamps per key; burst allowance on global + per-client'],
+    ['3.1','In','Slow-loris',5,'Concurrency semaphore, released when the response completes'],
+    ['3.1','In','Size / HMAC / IP lists',5,'Guards: no counter at all'],
+    ['3.2','In','GET + excluded paths',5,'No limiter (bypass)'],
+    ['3.3','In','Observe-only',3,'Same algorithms, denial logged not applied']
+  ];
+  var h='<tr><th>Use case</th><th>Side</th><th>Scope</th>'+cols.map(function(c){return '<th>'+c+'</th>';}).join('')+'<th>What we actually use</th></tr>';
+  rows.forEach(function(r){
+    h+='<tr><td><b>'+r[0]+'</b></td><td><span class="tag '+(r[1]==='Out'?'t-ours':'t-teal')+'">'+r[1]+'</span></td><td>'+r[2]+'</td>';
+    cols.forEach(function(c,i){h+='<td style="text-align:center">'+(i===r[3]?'<span class="check">●</span>':'<span class="cross">·</span>')+'</td>';});
+    h+='<td>'+r[4]+'</td></tr>';
+  });
+  put('algoTable',h);
+})();
+})();
+</script>
+</body>
+</html>

@@ -41,7 +41,7 @@ Status legend: `[ ]` pending · `[x]` done · `[~]` in progress
 **STATUS: COMPLETE (2026-07-07).** All items implemented, live-verified against the simulators (evidence: `docs/DEMO.md` §4 and `CODE_REVIEW_AND_TEST_PLAN.md` §3.1), solution builds clean (0 warnings).
 
 ### A1. Per-account per-second dispatch cap (plan delta **O9**) ✅
-- [x] `PerSecondDispatchGate` (reservation-style token bucket per tenant) added in `InstagramSenderApi\Instagram\Services\`; limit via `RateLimiting:Outbound:PerSecondDispatchLimit` (default 100/s; per-message-class limits are a config change at integration time).
+- [x] `PerSecondDispatchGate` (reservation-style token bucket per tenant; replaced by a sliding-window log per tenant and class in Oct 2026, TRD §8.2) added in `InstagramSenderApi\Instagram\Services\`; limit via `RateLimiting:Outbound:PerSecondDispatchLimit` (default 100/s; per-message-class limits are a config change at integration time).
 - [x] Enforced by `InstagramThrottleGuard.EnforceAsync` as the last pre-flight step, before the HTTP call.
 - [x] Verified: 15 sends through a 4/s gate vs mock 5/s cap → 15/15 sent, zero code-17 errors, mock never blocked.
 
@@ -169,7 +169,7 @@ There is no shared app-wide DM budget. Nothing below is implemented yet — plan
   IGAutopilot can substitute its own without editing ours. **Record the coupling:** their 200/h counter
   keeps 750/h unreachable today — raising `Instagram:RateLimitPerHour` above 750 without this re-opens it.
 - [ ] **A13.5 (O16) — Put the per-second gate behind an interface.** `PerSecondDispatchGate` holds
-  buckets in a process-local `ConcurrentDictionary` ([:21](InstagramSenderApi/Instagram/Services/PerSecondDispatchGate.cs#L21)),
+  windows in a process-local `ConcurrentDictionary` ([:52](InstagramSenderApi/Instagram/Services/PerSecondDispatchGate.cs#L52)),
   and the Worker runs on **4 servers** (`m1`/`m2`/`m7`/`m9`, 200 message workers each) → up to **4×
   Meta's cap**; Conversations 2/s becomes 8/s. Introduce **`IDispatchRateLimiter`** with the current
   class as `InMemoryDispatchRateLimiter`, mirroring the inbound `IRateLimitStore` seam so the solution
@@ -242,8 +242,8 @@ business id and `type`, the same collapse **A13.3** already flags on our side.
 - [ ] **Action:** add `InstagramSenderApi.Tests` (xUnit, matching their conventions) covering, at minimum:
   `InstagramRateLimitHandler` header/error-body parsing including malformed headers and each error code;
   the `>0 / 0 / null` block semantics; `TenantRateLimitService` threshold and app-vs-account precedence;
-  `DispatchClassifier` for every class including the attachment split; `PerSecondDispatchGate` refill
-  arithmetic. Blocked on **A14.6** for anything time-dependent.
+  `DispatchClassifier` for every class including the attachment split; `PerSecondDispatchGate` window
+  arithmetic (done in `RateLimit.Tests/OutboundGateTests.cs`). Blocked on **A14.6** for anything time-dependent.
 
 ##### A14.2 (High) — `EnsureTableExistsAsync` creates a **database** at runtime
 - [ ] [SqlTenantRateLimitRepository.cs:55](InstagramSenderApi/Instagram/Infrastructure/SqlTenantRateLimitRepository.cs#L55)
@@ -291,10 +291,10 @@ business id and `type`, the same collapse **A13.3** already flags on our side.
   target.BlockedUntilUtc)`) rather than doing it in C#. Removes the read entirely and pairs naturally with
   the A14.4 guard — do both in one edit.
 
-##### A14.6 (Medium) — `PerSecondDispatchGate._buckets` is unbounded
-- [ ] [PerSecondDispatchGate.cs:21](InstagramSenderApi/Instagram/Services/PerSecondDispatchGate.cs#L21)
+##### A14.6 (Medium) — `PerSecondDispatchGate._windows` is unbounded
+- [ ] [PerSecondDispatchGate.cs:52](InstagramSenderApi/Instagram/Services/PerSecondDispatchGate.cs#L52)
   — `ConcurrentDictionary` keyed `{tenantId}|{class}`, entries added at
-  [:74](InstagramSenderApi/Instagram/Services/PerSecondDispatchGate.cs#L74) and **never evicted**.
+  [:109](InstagramSenderApi/Instagram/Services/PerSecondDispatchGate.cs#L109) and **never evicted**.
 - [ ] **Why:** this is the same defect class the review already found and fixed on the inbound side
   (`CODE_REVIEW_AND_TEST_PLAN.md` §2 defect #18 — self-pruning buckets, idle eviction, key caps). The
   outbound gate never got the same treatment. Bounded by account count rather than attacker input, so it
@@ -337,12 +337,12 @@ business id and `type`, the same collapse **A13.3** already flags on our side.
 ##### A14.10 (Low) — No clock abstraction
 - [ ] `DateTime.UtcNow` throughout (`TenantRateLimitState.IsCurrentlyBlocked`,
   [TenantRateLimitService.cs:54](InstagramSenderApi/Instagram/Services/TenantRateLimitService.cs#L54)),
-  `Environment.TickCount64` in the gate.
+  (the gate itself now takes a `TimeProvider`, Oct 2026).
 - [ ] **Why:** every interesting behaviour here is time-dependent — block expiry, the 10-second cache,
-  token refill, window resets. Without an injectable clock those branches can only be tested by sleeping,
+  window resets. Without an injectable clock those branches can only be tested by sleeping,
   which is why **A14.1** is hard to start. This is a prerequisite, not a nicety.
 - [ ] **Action:** inject `TimeProvider` (in-box on net8+, and IGAutopilot is on net10) through
-  `TenantRateLimitService`, `TenantRateLimitState` and `PerSecondDispatchGate`. Do this **before** A14.1.
+  `TenantRateLimitService` and `TenantRateLimitState` (`PerSecondDispatchGate` is done). Do this **before** A14.1.
 
 ##### A14.11 (Low) — `SELECT *` against a shared, Flyway-owned schema
 - [ ] [SqlTenantRateLimitRepository.cs:26](InstagramSenderApi/Instagram/Infrastructure/SqlTenantRateLimitRepository.cs#L26).

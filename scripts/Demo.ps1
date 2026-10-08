@@ -594,7 +594,7 @@ function Send-Job {
 }
 
 # One curl process with repeated --next: a ForEach-Object { curl } loop spends tens of ms per
-# process and can never fill a per-second bucket.
+# process and can never fill a per-second window.
 function Send-Burst {
     param([int]$Count, [string]$Tenant, [string]$Endpoint, [string]$PayloadJson = '{}')
     $body = '{"tenantId":"' + $Tenant + '","targetEndpoint":"' + $Endpoint + '","payload":' + $PayloadJson + '}'

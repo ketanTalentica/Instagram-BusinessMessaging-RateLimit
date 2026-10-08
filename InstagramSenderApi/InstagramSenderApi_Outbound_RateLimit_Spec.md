@@ -110,7 +110,7 @@ Full reference table of Meta's levels/codes with doc links: `docs/TRD_RateLimiti
 - **`error_subcode` parsed**: `613/1996` ("inconsistent behavior in the API request volume of your app") carries no `estimated_time_to_regain_access`; it takes a **15-minute** block floor instead of the 1-minute default, because retrying in a minute walks straight back into the flag.
 - **Blocks routed by level**: `AppLevelErrorCodes = [4, 613]` block the shared `app:{AppId}` row; account-level codes block the tenant row. `GetThrottleDelayAsync` throws `TenantBlockedException` for *any* tenant while the app row is blocked — previously one unlucky account absorbed an app-wide limit while every other account kept calling. A success clears an account block but **never** an app block (one account recovering does not prove a shared budget recovered).
 - **L1/L2 figures kept apart**: `X-App-Usage` is recorded only on the app row, BUC figures only on the tenant row; the tenant row is written only when account-level evidence exists, so an app-usage-only response cannot zero a real per-account figure. Throttling is unchanged — the guard still takes `max(tenantPct, appPct)`.
-- **Per-second caps per call class** (`DispatchClassifier` + one bucket per tenant *and* class): text/links/reactions/stickers `PerSecondDispatchLimit` 100/s, audio/video `PerSecondMediaDispatchLimit` 10/s, Conversations `PerSecondConversationsDispatchLimit` 2/s, unclassified `PerSecondUnclassifiedDispatchLimit` 2/s. Text and audio/video share the `/messages` endpoint, so the class comes from `message.attachment.type` in the payload, not the URL alone.
+- **Per-second caps per call class** (`DispatchClassifier` + one sliding window per tenant *and* class): text/links/reactions/stickers `PerSecondDispatchLimit` 100/s, audio/video `PerSecondMediaDispatchLimit` 10/s, Conversations `PerSecondConversationsDispatchLimit` 2/s, unclassified `PerSecondUnclassifiedDispatchLimit` 2/s. Text and audio/video share the `/messages` endpoint, so the class comes from `message.attachment.type` in the payload, not the URL alone.
 - **Budget ceilings are not knowable**: Meta's Instagram allowance is `4800 × impressions` over 24 h and only a *percentage* is ever reported, so no absolute per-account call budget can be pre-computed — the 80 % threshold is the primary defence, not a refinement of a known quota.
 - **New mock scenarios**: `InstagramBucBlock` (80002), `CustomRateLimit613` (613/1996), `AppLevelBlock` (4) — all on HTTP 400 with no `Retry-After`, so only the code list can recognise them.
 - **net8.0 note**: components compile on net8.0 (IGAutopilot's target). `HttpContent.LoadIntoBufferAsync(CancellationToken)` is .NET 9-only — the handler deliberately uses the parameterless overload.
@@ -353,8 +353,8 @@ As-built gates, in order:
 | 100 | `HeaderUsageThrottleGate` | the proactive delay from `GetThrottleDelayAsync` (headers, `max(tenantPct, appPct)` ≥ 80%) |
 | 200 | `PerSecondDispatchGate` | the wait until the oldest of the last N dispatches for this tenant *and dispatch class* is a second old |
 
-`PerSecondDispatchGate` is last by design: its token is for dispatching *now*, so any earlier gate's
-wait must already have elapsed, or the token is spent on a call that has not happened yet.
+`PerSecondDispatchGate` is last by design: its slot is for dispatching *now*, so any earlier gate's
+wait must already have elapsed, or the slot is spent on a call that has not happened yet.
 
 If the tenant is hard-blocked (`BlockedUntilUtc > UtcNow` on **either** the account row or the shared
 app row), `HeaderUsageThrottleGate` lets `TenantBlockedException(retryAfter)` propagate instead of

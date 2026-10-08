@@ -121,7 +121,7 @@ Every 429 carries Retry-After, X-RateLimit-Limit/Remaining/Reset.
 ## 4. Improvement Plan (recommended order)
 
 1. **Durable outbox for `SendJob`** — SQL `SendJobs` table (Status: Pending/Sent/Dead), worker reads oldest-pending per tenant; survives restarts, enables dead-lettering. (The spec already flags this.)
-2. ~~**Per-second dispatch cap**~~ — **DONE (2026-07-07)**: `PerSecondDispatchGate` token bucket per tenant, enforced by `InstagramThrottleGuard`; see §3.1 evidence below.
+2. ~~**Per-second dispatch cap**~~ — **DONE (2026-07-07)**: `PerSecondDispatchGate` token bucket per tenant (a sliding-window log per tenant and class since Oct 2026, see TRD §8.2), enforced by `InstagramThrottleGuard`; see §3.1 evidence below.
 3. **`RedisRateLimitStore`** for WebhookIngestApi when it goes multi-instance (Lua `ZADD`+`ZREMRANGEBYSCORE`+`ZCARD`); the `IRateLimitStore` seam is ready.
 4. **Forwarders done properly** — replace the custom XFF parsing with ASP.NET's `ForwardedHeadersMiddleware` + `KnownProxies` when the deployment topology is known.
 5. **Wire `WebhookResiliencePipeline`** — `/webhook` still has a TODO where accepted payloads should be dispatched downstream through the registered timeout+breaker pipeline.
@@ -187,7 +187,7 @@ Test doubles are hand-written (`TestDoubles.cs`); no mocking library was added.
 | `InboundPipelineTests` | rule order; every short-circuit proved by whether the store was touched (blocked IP, allow-list, 411/413, forged HMAC all reach it zero times); per-scope algorithm selection; concurrency slots | 4 |
 | `ClientIdentityResolverTests` | `TrustForwardedFor` on/off, first-hop-only parsing, header precedence, 64-char truncation | 4 |
 | `TenantRateLimitServiceTests` | delay thresholds and monotonicity; app-vs-account level separation (A12.8); app-level block holds an unrelated tenant; block set (+1 min buffer) / cleared on 0 / preserved on null | 1 |
-| `OutboundGateTests` | gate ordering regardless of registration order; per-class and per-tenant bucket isolation; reservation stacking; `TenantBlockedException` for account and app blocks; `Enabled: false` bypass | — |
+| `OutboundGateTests` | gate ordering regardless of registration order; per-class and per-tenant window isolation; reservation stacking; never more than the cap in any one-second span, cold start included; `TenantBlockedException` for account and app blocks; `Enabled: false` bypass | — |
 | `DispatchClassifierTests` | endpoint × payload matrix, including malformed payloads falling back to text rather than throwing | — |
 
 **Still uncovered, and still only exercised end to end by `run-all.bat`:** blueprint items 2

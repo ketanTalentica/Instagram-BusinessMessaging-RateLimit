@@ -4,7 +4,7 @@
 |---|---|
 | Solution | `RateLimit.sln` (.NET 9) |
 | Status | Implemented, reviewed, end-to-end verified (2026-07-06) |
-| Related docs | [Outbound spec](../InstagramSenderApi/InstagramSenderApi_Outbound_RateLimit_Spec.md) · [Inbound spec](../WebhookIngestApi/WebhookIngestApi_Inbound_RateLimit_Spec.md) · [Code review & test plan](../CODE_REVIEW_AND_TEST_PLAN.md) |
+| Related docs | [Outbound spec](../InstagramSenderApi/InstagramSenderApi_Outbound_RateLimit_Spec.md) · [Inbound spec](../WebhookIngestApi/WebhookIngestApi_Inbound_RateLimit_Spec.md) · [Code review & test plan](../CODE_REVIEW_AND_TEST_PLAN.md) · [Visual design map](TRD_RateLimiting.html) |
 
 ---
 
@@ -230,7 +230,7 @@ All three level defects found during the 2026-08-04 audit are fixed. Verified li
 |---|---|---|
 | **App-level blocks landed on the account row.** Codes 4 / 613 / 613-1996 mean *the app* is limited, so blocking the one account that received the response left every other account calling into an app-wide limit | `AppLevelErrorCodes = [4, 613]`; the block routes to `AppStateKey`, the account row is left unblocked, and `GetThrottleDelayAsync` now throws for **any** tenant while the app row is blocked | `AppLevelBlock` scenario → `code=4, level=app` → `app:local-dev-app` blocked until 13:53:37, `tenant-guilty` row unblocked at its own 20 %, and a different healthy tenant logged `held by an APP-level block for 00:06:55` **without making a call** |
 | **App usage % inflated every account's own figures** — `X-App-Usage` was merged into the same locals persisted to the tenant row, so one hot app budget made all accounts look hot | L1 and L2 maxima kept in separate locals; the account row is written only when account-level evidence exists (`sawBucSignal`, an account-level code, or a success), so an app-usage-only response can no longer overwrite real per-account figures with zeros | `SharedAppBudget` (app 92 %) → `app:local-dev-app` = 92, `tenant-light` = **5** (its own BUC figure). Before the fix the same row read **92** |
-| **One per-second cap for four different limits** — 100/s applied to classes Meta caps at 10/s and 2/s | Four configurable caps and a bucket per tenant **and** class; `DispatchClassifier` reads the endpoint and the payload attachment type, defaulting to the tightest cap (2/s) when it cannot classify | 6 `/conversations` jobs → `class=Conversations cap=2/s`, 4 waits of ~500 ms. 20 video-attachment sends → `class=MediaSend cap=10/s`, 10 waits. 20 text sends on the **same** `/messages` endpoint in the same burst → **no** gate waits (100/s) |
+| **One per-second cap for four different limits** — 100/s applied to classes Meta caps at 10/s and 2/s | Four configurable caps and a dispatch window per tenant **and** class; `DispatchClassifier` reads the endpoint and the payload attachment type, defaulting to the tightest cap (2/s) when it cannot classify | 6 `/conversations` jobs → `class=Conversations cap=2/s`, 4 waits of ~500 ms. 20 video-attachment sends → `class=MediaSend cap=10/s`, 10 waits. 20 text sends on the **same** `/messages` endpoint in the same burst → **no** gate waits (100/s) |
 
 One deliberate asymmetry: a success clears an **account** block (that account demonstrably recovered)
 but never an **app** block. During verification an unrelated tenant's in-flight success wiped a live
@@ -320,15 +320,14 @@ Live verification (2026-07-06):
 | Fresh machine | `SenderDB` + table auto-created |
 
 **July 2026 update — coverage deltas O9–O11 implemented and live-verified in this workspace**
-(evidence in [DEMO.md](DEMO.md) §4): per-second dispatch cap (`PerSecondDispatchGate`, token
-bucket per tenant), shared app-level budget (global `app:{AppId}` state row; guard throttles on
+(evidence in [DEMO.md](DEMO.md) §4): per-second dispatch cap (`PerSecondDispatchGate`, then a token
+bucket per tenant; a sliding-window log per tenant and class since Oct 2026, §8.2), shared app-level budget (global `app:{AppId}` state row; guard throttles on
 `max(tenantPct, appPct)`), and `Retry-After` parsing on HTTP 429. Outbound enforcement is now
 config-gated (`RateLimiting:Outbound:Enabled`); inbound gained `Enabled` / `ObserveOnly` /
 `ExcludedPaths` plus an unconditional GET bypass, and its config section was renamed to
 `RateLimiting:Inbound`. I9–I10 remain deployment/rollout items for the integration.
 
-Known gaps (accepted, tracked): in-memory job queue (outbox planned), no automated test project
-yet (unit-test blueprint in the review doc), some sender constants (80 % threshold, cache TTL)
+Known gaps (accepted, tracked): in-memory job queue (outbox planned), some sender constants (80 % threshold, cache TTL)
 remain compile-time pending an options pass (§6.4). Full July-2026 coverage assessment and the
 corresponding work items (O9–O11, I9–I10):
 [INTEGRATION_PLAN_IGAutopilot.md §5](INTEGRATION_PLAN_IGAutopilot.md).
@@ -499,11 +498,16 @@ Our `SlidingWindow` is that article's **sliding window log** (a queue of timesta
   when inbound goes multi-instance on Redis, **per-IP is the scope where log memory bites** at
   internet key cardinality. The fix is one config value (`PerIpAlgorithm`) plus a fourth strategy
   file; no rule changes.
-- **Cold-start overshoot.** The outbound bucket starts full, so a restart can emit up to 2x the cap
-  in the first second (this is what makes demo 2.1 flaky; see `docs/DEMO.md` §4). It is the textbook
-  token-bucket trade-off — "can allow instantaneous bursts that overwhelm downstream services" —
-  arriving exactly as predicted. Open decision, not yet fixed.
+- **Cold-start overshoot — fixed (Oct 2026).** The outbound gate used to be a token bucket that
+  started full, so a restart could emit capacity + rate − 1 calls in the first second (7 for a 4/s
+  gate), which is what failed demo 2.1. It is the textbook token-bucket trade-off — "can allow
+  instantaneous bursts that overwhelm downstream services" — arriving exactly as predicted. The gate
+  is now a sliding-window log (§8.2), which caps **any** one-second span, cold start included; the
+  test `A_cold_start_never_lets_more_than_the_cap_out_in_one_second` holds it there. What remains
+  is network jitter between the gate and the wire, which is why the demo gate runs one below the
+  mock's cap (`docs/DEMO.md` §4).
 - **Token bucket and leaky bucket are the same maths.** Presenting them as separate algorithms is a
   common simplification. The real difference is what happens on overflow: reject (token) or
-  queue/delay (leaky). We use both behaviours from one implementation, which is why the outbound
-  gate is listed above as a shaper rather than a limiter.
+  queue/delay (leaky). The same split applies to any counter: inbound `TokenBucket` rejects on
+  overflow, while the outbound gate — a sliding-window log — returns a delay instead, which is why it
+  is listed above as a shaper rather than a limiter.
