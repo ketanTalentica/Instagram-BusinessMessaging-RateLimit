@@ -1,0 +1,970 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rate Limit Run</title>
+<!--
+  Template for the per-run visual report written by scripts/Demo.ps1 (Write-Report).
+  The runner replaces __REPORT_DATA__ with the captured run as JSON. Self-contained on purpose:
+  no CDN, no external fonts - the file must open offline and stay readable when archived.
+  Keep this file ASCII-only (the runner reads it as UTF-8, but PowerShell 5.1 tooling around it
+  does not always), so arrows and dashes below are HTML entities or \u escapes.
+-->
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2330; --muted: #5e6675; --line: #dde1e8;
+  --grid: #eceff3; --pass: #1f8a4c; --fail: #c62f2f; --warn: #b26b00; --info: #2f62c6;
+  --sent: #1f8a4c; --http: #2f62c6; --err: #c62f2f; --gate: #d88a00; --throttle: #7b4fc9;
+  --eta: #c62f2f; --buffer: #e98b8b; --pause: #5b7896; --held: #8a1f1f; --until: #1d2330;
+  --c202: #2e9b5f; --c429: #e0a100; --c401: #c62f2f; --c413: #7b4fc9; --c403: #3b3f4a; --cother: #8b93a1;
+  --chip: #eef1f5;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12151b; --panel: #1b1f27; --ink: #e6e9ef; --muted: #9aa3b2; --line: #2c323d;
+    --grid: #242a33; --pass: #4cc27f; --fail: #ef6b6b; --warn: #e6a23c; --info: #6f9bf0;
+    --sent: #4cc27f; --http: #6f9bf0; --err: #ef6b6b; --gate: #f0b13a; --throttle: #a98be8;
+    --eta: #ef6b6b; --buffer: #8f4a4a; --pause: #7d98b5; --held: #ff9090; --until: #e6e9ef;
+    --c202: #4cc27f; --c429: #f0c23a; --c401: #ef6b6b; --c413: #a98be8; --c403: #c3c8d2; --cother: #7c8494;
+    --chip: #262b35;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12151b; --panel: #1b1f27; --ink: #e6e9ef; --muted: #9aa3b2; --line: #2c323d;
+  --grid: #242a33; --pass: #4cc27f; --fail: #ef6b6b; --warn: #e6a23c; --info: #6f9bf0;
+  --sent: #4cc27f; --http: #6f9bf0; --err: #ef6b6b; --gate: #f0b13a; --throttle: #a98be8;
+  --eta: #ef6b6b; --buffer: #8f4a4a; --pause: #7d98b5; --held: #ff9090; --until: #e6e9ef;
+  --c202: #4cc27f; --c429: #f0c23a; --c401: #ef6b6b; --c413: #a98be8; --c403: #c3c8d2; --cother: #7c8494;
+  --chip: #262b35;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 18px; margin: 0; }
+h3 { font-size: 13px; margin: 18px 0 6px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.muted { color: var(--muted); }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin-top: 18px; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); font-size: 13px; }
+.badge { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  color: #fff; vertical-align: middle; white-space: nowrap; }
+.b-PASS { background: var(--pass); } .b-FAIL { background: var(--fail); }
+.b-ABORTED { background: var(--fail); } .b-OBSERVED { background: var(--info); }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+a { color: var(--info); }
+.case-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+.flow { font-size: 13px; color: var(--muted); margin-top: 4px; }
+.plain { margin: 10px 0 0; padding-left: 18px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.chip { background: var(--chip); border-radius: 6px; padding: 2px 8px; font-size: 12px; }
+.checks { list-style: none; margin: 0; padding: 0; }
+.checks li { padding: 3px 0; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+.ok::before { content: "\2713  "; color: var(--pass); font-weight: 700; }
+.no::before { content: "\2717  "; color: var(--fail); font-weight: 700; }
+.chart { width: 100%; height: auto; display: block; }
+.chart text { fill: var(--ink); font-size: 11px; font-family: system-ui, "Segoe UI", sans-serif; }
+.chart .axis text, .chart .sub { fill: var(--muted); }
+.chart .grid { stroke: var(--grid); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); margin: 6px 0 2px; }
+.legend i { display: inline-block; width: 12px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.callout { border-left: 3px solid var(--info); padding: 6px 10px; background: var(--chip); border-radius: 4px; font-size: 13px; margin-top: 10px; }
+.callout.bad { border-color: var(--fail); } .callout.good { border-color: var(--pass); }
+details { margin-top: 10px; }
+summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+pre { background: var(--chip); padding: 10px; border-radius: 6px; overflow-x: auto; font-size: 11.5px; line-height: 1.45; max-height: 420px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+@media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+.mech { margin-top: 14px; border: 1px solid var(--line); border-left: 4px solid var(--info); border-radius: 8px;
+  padding: 12px 14px; background: var(--chip); }
+.mech .k { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--info); }
+.mech .name { font-size: 16px; font-weight: 700; margin: 2px 0 2px; }
+.mech .layer { font-size: 12px; color: var(--muted); }
+.mech ol { margin: 8px 0 6px; padding-left: 20px; }
+.mech li { margin: 2px 0; }
+.mech .run { margin-top: 8px; padding: 6px 10px; border-radius: 6px; background: var(--panel); font-size: 13px; }
+.mech .run b { color: var(--info); }
+.mech .meta2 { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.mech .meta2 .chip { background: var(--panel); }
+.mech code { font-size: 12px; }
+.mtag { display: inline-block; font-size: 12px; color: var(--muted); }
+.toolbar { float: right; }
+.toolbar button { background: var(--chip); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px; cursor: pointer; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="toolbar"><button id="theme" type="button">Toggle theme</button></div>
+  <h1>Rate limiting &mdash; run report</h1>
+  <div class="meta" id="runmeta"></div>
+  <div class="panel" id="summary"></div>
+  <div id="cases"></div>
+</div>
+
+<script id="report-data" type="application/json">__REPORT_DATA__</script>
+<script>
+(function () {
+'use strict';
+
+var R;
+try { R = JSON.parse(document.getElementById('report-data').textContent); }
+catch (e) {
+  // Opened as the raw template: the data placeholder has not been filled by a run.
+  document.getElementById('summary').innerHTML =
+    '<h2>This is the report template, not a report</h2>' +
+    '<p>It has no run data yet. Each runner session writes a filled-in copy to ' +
+    '<code>reports\\run-&lt;yyyyMMdd-HHmmss&gt;.html</code> &mdash; open that file instead.</p>' +
+    '<p>To create one: <code>.\\run-all.bat</code> (menu) or <code>.\\run-all.bat outbound</code> / <code>inbound</code> / <code>2.5</code>.</p>';
+  return;
+}
+var ARROW = String.fromCharCode(0x2192);
+var DOT = String.fromCharCode(0x00b7), TIMES = String.fromCharCode(0x00d7);
+
+// ------------------------------------------------------------------ small helpers
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function arr(x) { return x == null ? [] : (Array.isArray(x) ? x : [x]); }
+function param(c, name) {
+  var p = arr(c.params).filter(function (q) { return q.name === name; })[0];
+  return p ? p.value : null;
+}
+function verdict(c) { return c.result || 'OBSERVED'; }
+function fmtMs(v) {
+  var a = Math.abs(v);
+  if (a < 1000) return Math.round(v) + ' ms';
+  if (a < 60000) return (v / 1000).toFixed(a < 10000 ? 1 : 0) + ' s';
+  var m = Math.floor(a / 60000), s = Math.round((a % 60000) / 1000);
+  return (v < 0 ? '-' : '') + m + ':' + (s < 10 ? '0' : '') + s + ' min';
+}
+function hms(h, m, s) { return ((+h) * 3600 + (+m) * 60 + (+s)) * 1000; }
+
+// ------------------------------------------------------------------ log parsing
+// Lines look like "14:03:22.123 info: Category[0] message" (the runner sets the format).
+
+var LINE_RE = /^(\d{2}):(\d{2}):(\d{2})\.(\d{3}) (\w+): (\S+?)\[\d+\] (.*)$/;
+
+function parseLog(lines, startClockMs) {
+  return arr(lines).map(function (raw) {
+    var m = LINE_RE.exec(raw);
+    if (!m) return { t: null, raw: raw, msg: raw, level: '', cat: '' };
+    var clock = hms(m[1], m[2], m[3]) + (+m[4]);
+    var t = clock - startClockMs;
+    if (t < -12 * 3600000) t += 86400000;   // run crossed midnight
+    return { t: t, raw: raw, msg: m[7], level: m[5], cat: m[6] };
+  });
+}
+
+function hasTimestamps(c) {
+  var all = [].concat(arr(c.logs && c.logs.sender), arr(c.logs && c.logs.sim), arr(c.logs && c.logs.ingest));
+  return all.some(function (l) { return LINE_RE.test(l); });
+}
+
+// Sender log -> typed events. The arrow and dash in the messages may arrive mangled by the
+// console code page, so patterns never rely on them.
+function senderEvents(c) {
+  var out = [];
+  parseLog(c.logs && c.logs.sender, c.startClockMs).forEach(function (e) {
+    if (e.t == null) return;
+    var s = e.msg, m;
+    if ((m = /^Sending HTTP request POST (\S+)/.exec(s))) {
+      var tm = /\/v[\d.]+\/([^\/]+)\//.exec(m[1]);
+      out.push({ t: e.t, kind: 'http', tenant: tm ? tm[1] : '?', url: m[1], raw: e.raw });
+    } else if ((m = /^Received HTTP response headers after ([\d.]+)ms - (\d+)/.exec(s))) {
+      out.push({ t: e.t, kind: 'resp', ms: +m[1], status: +m[2], raw: e.raw });
+    } else if ((m = /Per-second gate for tenant (\S+?): class=(\w+) cap=(\d+)\/s .*?waiting ([\d.]+) ms/.exec(s))) {
+      out.push({ t: e.t, kind: 'gate', tenant: m[1], cls: m[2], cap: +m[3], wait: +m[4], raw: e.raw });
+    } else if ((m = /Proactive throttle for tenant (\S+?): delaying ([\d.]+) ms/.exec(s))) {
+      out.push({ t: e.t, kind: 'throttle', tenant: m[1], wait: +m[2], raw: e.raw });
+    } else if ((m = /Rate-limit error for tenant (\S+?): code=(\d+), subcode=(\d+), level=(\w+), retryAfter=(\d+)min/.exec(s))) {
+      out.push({ t: e.t, kind: 'rlerror', tenant: m[1], code: +m[2], sub: +m[3], level: m[4], minutes: +m[5], raw: e.raw });
+    } else if ((m = /HTTP 429 for tenant (\S+?): Retry-After\D*(\d+) min/.exec(s))) {
+      out.push({ t: e.t, kind: 'http429', tenant: m[1], minutes: +m[2], raw: e.raw });
+    } else if ((m = /Tenant (\S+) is blocked for (\d+) min/.exec(s))) {
+      out.push({ t: e.t, kind: 'block', tenant: m[1], minutes: +m[2], raw: e.raw });
+    } else if ((m = /Tenant (\S+) rate-limited \((\w+)\).*?pausing (\d+):(\d{2}):(\d{2})/.exec(s))) {
+      out.push({ t: e.t, kind: 'pause', tenant: m[1], status: m[2], dur: hms(m[3], m[4], m[5]), raw: e.raw });
+    } else if ((m = /Tenant (\S+) held by an APP-level block for (\d+):(\d{2}):(\d{2})/.exec(s))) {
+      out.push({ t: e.t, kind: 'held', tenant: m[1], dur: hms(m[2], m[3], m[4]), raw: e.raw });
+    } else if ((m = /Tenant (\S+) blocked .*?re-queuing after (\d+):(\d{2}):(\d{2})/.exec(s))) {
+      out.push({ t: e.t, kind: 'requeue', tenant: m[1], dur: hms(m[2], m[3], m[4]), raw: e.raw });
+    } else if ((m = /Sent job for tenant (\S+)/.exec(s))) {
+      out.push({ t: e.t, kind: 'sent', tenant: m[1], raw: e.raw });
+    } else if ((m = /Non-success (\S+) for tenant (\S+)/.exec(s))) {
+      out.push({ t: e.t, kind: 'nonsuccess', tenant: m[2], status: m[1], raw: e.raw });
+    }
+  });
+  pairResponses(out);
+  return out;
+}
+
+// HttpClient logs a request and its response on separate lines with nothing linking them.
+// Pair them oldest-first, but only while every outstanding request belongs to one tenant;
+// otherwise the status is left unattributed rather than guessed.
+function pairResponses(events) {
+  var open = [];
+  events.forEach(function (e) {
+    if (e.kind === 'http') { open.push(e); return; }
+    if (e.kind !== 'resp' || !open.length) return;
+    var tenants = {};
+    open.forEach(function (o) { tenants[o.tenant] = 1; });
+    var req = open.shift();
+    if (Object.keys(tenants).length === 1) { req.status = e.status; req.latency = e.ms; }
+  });
+}
+
+// Server-side view, one clock: the ingest API logs every accepted request ("Webhook accepted")
+// and every denial or would-be denial, at the moment it decided. The simulator only sees the
+// response ~100 ms later, so mixing the two logs would shift one series against the other.
+function inboundEvents(c) {
+  var decided = [], deny = [];
+  parseLog(c.logs && c.logs.ingest, c.startClockMs).forEach(function (e) {
+    if (e.t == null) return;
+    if (/^Webhook accepted/.test(e.msg)) { decided.push({ t: e.t, status: 202 }); return; }
+    var m = /(OBSERVE ONLY: would deny|Request denied:) (\w+)\D*?(\d{3})/.exec(e.msg);
+    if (!m) return;
+    var d = { t: e.t, observe: m[1].indexOf('OBSERVE') === 0, reason: m[2], status: +m[3] };
+    deny.push(d);
+    if (!d.observe) decided.push({ t: e.t, status: d.status });
+  });
+  return { decided: decided, deny: deny };
+}
+
+// ------------------------------------------------------------------ SVG primitives
+
+function scale(d0, d1, r0, r1) {
+  var k = (r1 - r0) / ((d1 - d0) || 1);
+  return function (v) { return r0 + (v - d0) * k; };
+}
+function niceStep(span, target) {
+  var steps = [1, 2, 5, 10, 20, 50, 100, 200, 250, 500, 1000, 2000, 5000, 10000, 15000, 30000,
+               60000, 120000, 300000, 600000, 900000, 1800000];
+  for (var i = 0; i < steps.length; i++) if (span / steps[i] <= target) return steps[i];
+  return steps[steps.length - 1];
+}
+function svgOpen(w, h, label) {
+  return '<svg class="chart" viewBox="0 0 ' + w + ' ' + h + '" role="img" aria-label="' + esc(label) + '">';
+}
+function line(x1, y1, x2, y2, stroke, extra) {
+  return '<line x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 + '" stroke="' + stroke + '" ' + (extra || '') + '/>';
+}
+function rect(x, y, w, h, fill, title, extra) {
+  return '<rect x="' + x + '" y="' + y + '" width="' + Math.max(1.5, w) + '" height="' + h + '" fill="' + fill +
+    '" rx="2" ' + (extra || '') + '>' + (title ? '<title>' + esc(title) + '</title>' : '') + '</rect>';
+}
+function text(x, y, s, extra) { return '<text x="' + x + '" y="' + y + '" ' + (extra || '') + '>' + esc(s) + '</text>'; }
+// Text drawn over bars: a panel-coloured outline keeps it readable wherever it lands.
+function haloText(x, y, s, extra) {
+  return text(x, y, s, 'stroke="var(--panel)" stroke-width="3.5" paint-order="stroke" stroke-linejoin="round" ' + (extra || ''));
+}
+// Tick labels carry exactly the precision the step needs, so neighbours never print alike.
+function fmtTick(v, step) {
+  if (step >= 60000) return fmtMs(v);
+  if (step >= 1000 || Math.abs(v) >= 1000) {
+    var dec = step % 1000 === 0 ? 0 : step % 100 === 0 ? 1 : step % 10 === 0 ? 2 : 3;
+    return (v / 1000).toFixed(dec) + ' s';
+  }
+  return Math.round(v) + ' ms';
+}
+function timeAxis(x, x0, x1, top, bottom) {
+  var step = niceStep(x1 - x0, 9), out = '<g class="axis">';
+  for (var v = Math.ceil(x0 / step) * step; v <= x1; v += step) {
+    out += line(x(v), top, x(v), bottom, 'var(--grid)');
+    out += text(x(v), bottom + 14, fmtTick(v, step), 'text-anchor="middle"');
+  }
+  return out + '</g>';
+}
+function legend(items) {
+  return '<div class="legend">' + items.map(function (i) {
+    return '<span><i style="background:' + i[0] + '"></i>' + esc(i[1]) + '</span>';
+  }).join('') + '</div>';
+}
+
+// ------------------------------------------------------------------ lane timeline
+// Lanes are tenants (and the shared app row). Points are instants, bars are durations.
+// `cutoff` = the moment the runner stopped watching: anything later is drawn faded, because
+// it is what the system had SCHEDULED, not something this run observed.
+
+// Three rows per lane: blocks on top (label above), pacing waits through the middle with the
+// instant markers, queue pauses below (label below). Labels therefore never share a row.
+var BAR_STYLE = {
+  eta:      { fill: 'var(--eta)',      dy: -14, h: 7, labelDy: -3 },
+  buffer:   { fill: 'var(--buffer)',   dy: -14, h: 7, labelDy: -3 },
+  held:     { fill: 'var(--held)',     dy: -14, h: 7, labelDy: -3 },
+  gate:     { fill: 'var(--gate)',     dy: -3,  h: 6, labelDy: -3 },
+  throttle: { fill: 'var(--throttle)', dy: -3,  h: 6, labelDy: -3 },
+  pause:    { fill: 'var(--pause)',    dy: 8,   h: 6, labelDy: 16 }
+};
+
+function laneTimeline(o) {
+  // Extra headroom when there is a cutoff: its caption sits above the lanes, clear of every label.
+  var W = 1000, L = 170, Rpad = 20, laneH = o.laneH || 54, top = o.cutoff != null ? 24 : 10;
+  var pointLabels = o.pointLabels !== false;
+  var lastLabelX = {};   // lane -> x of the last point label, so repeats do not pile up
+  var labels = '';
+  var H = top + o.lanes.length * laneH + 28;
+  var x = scale(o.x0, o.x1, L, W - Rpad);
+  var clampX = function (v) { return Math.max(L, Math.min(W - Rpad, x(v))); };
+  var s = svgOpen(W, H, o.label);
+  s += timeAxis(x, o.x0, o.x1, top, top + o.lanes.length * laneH);
+  o.lanes.forEach(function (lane, i) {
+    var cy = top + i * laneH + laneH / 2;
+    s += line(L, top + (i + 1) * laneH, W - Rpad, top + (i + 1) * laneH, 'var(--grid)');
+    s += text(L - 10, cy - 2, lane.label, 'text-anchor="end" font-weight="600"');
+    if (lane.sub) s += text(L - 10, cy + 12, lane.sub, 'text-anchor="end" class="sub"');
+  });
+  var laneIndex = {};
+  o.lanes.forEach(function (l, i) { laneIndex[l.key] = i; });
+  var cutoff = o.cutoff;
+
+  o.items.forEach(function (it) {
+    var i = laneIndex[it.lane];
+    if (i == null) return;
+    var cy = top + i * laneH + laneH / 2;
+    if (it.t2 != null) {
+      var st = BAR_STYLE[it.kind];
+      if (it.t2 < o.x0 || it.t > o.x1) return;
+      var a = clampX(it.t), b = clampX(it.t2);
+      if (cutoff != null && it.t2 > cutoff) {
+        var c = clampX(Math.max(it.t, cutoff));
+        if (c > a) s += rect(a, cy + st.dy, c - a, st.h, st.fill, it.title);
+        s += rect(c, cy + st.dy, b - c, st.h, st.fill, it.title + ' (scheduled, after the run stopped watching)', 'opacity="0.35"');
+      } else {
+        s += rect(a, cy + st.dy, b - a, st.h, st.fill, it.title);
+      }
+      if (it.label && b - a > 70) s += haloText(Math.max(a, L) + 4, cy + st.dy + st.labelDy, it.label, 'class="sub" font-size="10"');
+      return;
+    }
+    if (it.t < o.x0 || it.t > o.x1) return;
+    var px = x(it.t), t = it.title ? '<title>' + esc(it.title) + '</title>' : '';
+    // Point labels sit to the LEFT of their marker: the bars a marker triggers start at the
+    // marker and run right, so the left side is the free side.
+    function pointLabel(col) {
+      if (!pointLabels || !it.label) return '';
+      var prev = lastLabelX[it.lane];
+      if (prev && (prev.text === it.label || px - prev.x < 140)) return '';   // hover still has it
+      lastLabelX[it.lane] = { x: px, text: it.label };
+      var roomLeft = px - 9 > L + 7 * it.label.length;
+      // Collected and drawn after every bar, so a later bar can never paint over a label.
+      labels += haloText(roomLeft ? px - 9 : px + 9, cy + 4, it.label,
+        (roomLeft ? 'text-anchor="end" ' : '') + 'fill="' + col + '" font-weight="600"');
+      return '';
+    }
+    if (it.kind === 'http') {
+      var col = it.status >= 400 ? 'var(--err)' : 'var(--http)';
+      s += '<circle cx="' + px + '" cy="' + cy + '" r="4" fill="var(--panel)" stroke="' + col + '" stroke-width="2">' + t + '</circle>';
+    } else if (it.kind === 'sent') {
+      s += '<circle cx="' + px + '" cy="' + (cy + 10) + '" r="2.6" fill="var(--sent)">' + t + '</circle>';
+    } else if (it.kind === 'error') {
+      s += '<path d="M' + px + ' ' + (cy - 7) + ' l6 7 l-6 7 l-6 -7z" fill="var(--err)">' + t + '</path>' + pointLabel('var(--err)');
+    } else if (it.kind === 'held') {
+      s += '<rect x="' + (px - 5) + '" y="' + (cy - 5) + '" width="10" height="10" fill="var(--held)">' + t + '</rect>' + pointLabel('var(--held)');
+    } else if (it.kind === 'until') {
+      s += line(px, cy - 18, px, cy + 16, 'var(--until)', 'stroke-width="2"') +
+           '<circle cx="' + px + '" cy="' + (cy - 18) + '" r="3" fill="var(--until)">' + t + '</circle>';
+    }
+  });
+  if (cutoff != null && cutoff > o.x0 && cutoff < o.x1) {
+    var cx = x(cutoff), bottom = top + o.lanes.length * laneH;
+    s += line(cx, top - 6, cx, bottom, 'var(--muted)', 'stroke-dasharray="4 3"');
+    s += text(cx + 4, top - 9, 'run stopped watching here ' + ARROW + ' everything to the right is scheduled', 'class="sub" font-size="10"');
+  }
+  return s + labels + '</svg>';
+}
+
+// Turns sender events (+ SQL rows) into lanes and items.
+function outboundItems(c, ev) {
+  var lanes = [], seen = {};
+  function lane(key, sub) {
+    if (!seen[key]) { seen[key] = { key: key, label: key, sub: sub || '' }; lanes.push(seen[key]); }
+    return seen[key];
+  }
+  var items = [];
+  ev.forEach(function (e) {
+    if (!e.tenant) return;
+    lane(e.tenant);
+    switch (e.kind) {
+      case 'http': items.push({ lane: e.tenant, t: e.t, kind: 'http', status: e.status,
+        title: 'HTTP call' + (e.status ? ' ' + ARROW + ' ' + e.status : '') + '\n' + e.raw }); break;
+      case 'sent': items.push({ lane: e.tenant, t: e.t, kind: 'sent', title: e.raw }); break;
+      case 'gate': items.push({ lane: e.tenant, t: e.t, t2: e.t + e.wait, kind: 'gate', title: 'per-second gate wait ' + Math.round(e.wait) + ' ms (' + e.cls + ', cap ' + e.cap + '/s)' }); break;
+      case 'throttle': items.push({ lane: e.tenant, t: e.t, t2: e.t + e.wait, kind: 'throttle', label: 'throttle ' + fmtMs(e.wait), title: 'proactive throttle ' + Math.round(e.wait) + ' ms\n' + e.raw }); break;
+      case 'rlerror': items.push({ lane: e.tenant, t: e.t, kind: 'error', label: 'code ' + e.code + (e.sub ? '/' + e.sub : '') + ' (' + e.level + ')', title: e.raw }); break;
+      case 'http429': items.push({ lane: e.tenant, t: e.t, kind: 'error', label: 'HTTP 429', title: e.raw }); break;
+      case 'block':
+        items.push({ lane: e.tenant, t: e.t, t2: e.t + e.minutes * 60000, kind: 'eta', label: 'blocked ' + e.minutes + ' min', title: 'block from Meta\'s wait time: ' + e.minutes + ' min\n' + e.raw });
+        items.push({ lane: e.tenant, t: e.t + e.minutes * 60000, t2: e.t + (e.minutes + 1) * 60000, kind: 'buffer', title: '+1 min safety buffer added by TenantRateLimitService' });
+        break;
+      case 'pause': items.push({ lane: e.tenant, t: e.t, t2: e.t + e.dur, kind: 'pause', label: 'queue paused ' + fmtMs(e.dur), title: 'SendQueueWorker pauses this tenant, then re-queues the job\n' + e.raw }); break;
+      case 'requeue': items.push({ lane: e.tenant, t: e.t, t2: e.t + e.dur, kind: 'pause', label: 're-queue in ' + fmtMs(e.dur), title: e.raw }); break;
+      case 'held':
+        items.push({ lane: e.tenant, t: e.t, kind: 'held', label: 'held - no HTTP call', title: e.raw });
+        items.push({ lane: e.tenant, t: e.t, t2: e.t + e.dur, kind: 'held', title: 'held by the app-level block for ' + fmtMs(e.dur) });
+        break;
+      case 'nonsuccess': items.push({ lane: e.tenant, t: e.t, kind: 'error', label: 'HTTP ' + e.status, title: e.raw }); break;
+    }
+  });
+  arr(c.sqlRows).forEach(function (r) {
+    var l = lane(r.tenantId);
+    l.sub = r.callCountPct + '% used' + (r.blockedUntilMs != null ? ' ' + DOT + ' BLOCKED' : ' ' + DOT + ' not blocked');
+    if (r.blockedUntilMs != null)
+      items.push({ lane: r.tenantId, t: r.blockedUntilMs, kind: 'until', title: 'BlockedUntilUtc in SQL: ' + r.blockedUntilUtc + ' (UTC)' });
+  });
+  // app row first: it is the one that can hold every other lane
+  lanes.sort(function (a, b) { return (b.key.indexOf('app:') === 0) - (a.key.indexOf('app:') === 0); });
+  return { lanes: lanes, items: items };
+}
+
+function observedRange(ev) {
+  var ts = ev.filter(function (e) { return e.kind !== 'resp'; }).map(function (e) { return e.t; });
+  if (!ts.length) return null;
+  var a = Math.min.apply(null, ts), b = Math.max.apply(null, ts);
+  ev.forEach(function (e) { if ((e.kind === 'gate' || e.kind === 'throttle') && e.t + e.wait > b) b = e.t + e.wait; });
+  var pad = Math.max(150, (b - a) * 0.06);
+  return [a - pad, b + pad];
+}
+
+var LEGEND_OUT = [
+  ['var(--http)', 'HTTP call (red ring = error response)'], ['var(--sent)', 'job sent OK'],
+  ['var(--gate)', 'per-second gate wait'], ['var(--throttle)', 'proactive throttle (usage >= 80%)'],
+  ['var(--err)', 'rate-limit error from Meta'], ['var(--eta)', 'block: Meta\'s wait time'],
+  ['var(--buffer)', '+1 min buffer'], ['var(--pause)', 'queue paused / re-queue'],
+  ['var(--held)', 'held by app-level block'], ['var(--until)', 'BlockedUntilUtc (SQL)']
+];
+
+// ------------------------------------------------------------------ per-case views
+
+function viewObserved(c, ev, title) {
+  var g = outboundItems(c, ev), r = observedRange(ev);
+  if (!r || !g.lanes.length) return '<div class="callout">No timestamped sender events were captured for this case.</div>';
+  return '<h3>' + esc(title || 'What happened (observed, sender side)') + '</h3>' + legend(LEGEND_OUT) +
+    laneTimeline({ lanes: g.lanes, items: g.items, x0: r[0], x1: r[1], label: 'observed timeline' });
+}
+
+function viewBlocks(c, ev) {
+  var g = outboundItems(c, ev);
+  var ends = g.items.map(function (i) { return i.t2 != null ? i.t2 : i.t; });
+  if (!ends.length) return '';
+  var first = Math.min.apply(null, g.items.map(function (i) { return i.t; }));
+  var last = Math.max.apply(null, ends);
+  return '<h3>Block windows (the full wait the system committed to)</h3>' +
+    '<div class="muted">Everything right of the dashed line was scheduled when the run stopped watching; the end points are confirmed by <code>BlockedUntilUtc</code> in SQL.</div>' +
+    legend(LEGEND_OUT) +
+    laneTimeline({ lanes: g.lanes, items: g.items, x0: Math.min(0, first), x1: last + (last - first) * 0.04 + 5000,
+                   cutoff: c.durationMs, pointLabels: false, label: 'block windows' });
+}
+
+// 2.1: rolling one-second call count against the mock's cap and our gate.
+function viewRate(c, ev) {
+  var tenant = param(c, 'tenant id') || 'ps-tenant';
+  var cap = +(param(c, 'mock cap (calls/s)') || 5), gate = +(param(c, 'sender text-class gate (calls/s)') || 4);
+  var calls = ev.filter(function (e) { return e.kind === 'http' && e.tenant === tenant; });
+  if (!calls.length) return '';
+  var t0 = calls[0].t;
+  var pts = calls.map(function (e, i) {
+    var n = 0;
+    for (var j = 0; j <= i; j++) if (calls[j].t > e.t - 1000) n++;
+    return { t: e.t - t0, n: n, status: e.status };
+  });
+  var maxN = Math.max(cap + 2, Math.max.apply(null, pts.map(function (p) { return p.n; })) + 1);
+  var W = 1000, L = 60, Rp = 20, T = 14, H = 250, B = H - 34;
+  var span = pts[pts.length - 1].t + 400;
+  var x = scale(-200, span, L, W - Rp), y = scale(0, maxN, B, T);
+  var s = svgOpen(W, H, 'calls per rolling second');
+  s += timeAxis(x, -200, span, T, B);
+  for (var v = 0; v <= maxN; v++) {
+    s += line(L, y(v), W - Rp, y(v), 'var(--grid)');
+    s += '<g class="axis">' + text(L - 8, y(v) + 4, v, 'text-anchor="end"') + '</g>';
+  }
+  s += line(L, y(cap), W - Rp, y(cap), 'var(--err)', 'stroke-width="2" stroke-dasharray="6 4"');
+  s += text(W - Rp - 4, y(cap) - 5, 'Meta (mock) cap ' + cap + '/s', 'text-anchor="end" fill="var(--err)" font-weight="600"');
+  s += line(L, y(gate), W - Rp, y(gate), 'var(--gate)', 'stroke-width="2" stroke-dasharray="2 3"');
+  s += text(W - Rp - 4, y(gate) + 14, 'our gate ' + gate + '/s', 'text-anchor="end" fill="var(--gate)" font-weight="600"');
+  var path = '';
+  pts.forEach(function (p, i) { path += (i ? 'L' : 'M') + x(p.t) + ' ' + y(p.n) + ' '; });
+  s += '<path d="' + path + '" fill="none" stroke="var(--http)" stroke-width="1.5" opacity="0.6"/>';
+  pts.forEach(function (p, i) {
+    var bad = p.status >= 400;
+    s += '<circle cx="' + x(p.t) + '" cy="' + y(p.n) + '" r="' + (bad ? 6 : 4.5) + '" fill="' + (bad ? 'var(--err)' : 'var(--http)') + '">' +
+      '<title>call #' + (i + 1) + ' at +' + Math.round(p.t) + ' ms: ' + p.n + ' calls in the last 1000 ms' +
+      (p.status ? ' ' + ARROW + ' HTTP ' + p.status : '') + '</title></circle>';
+    if (bad) s += text(x(p.t) + 9, y(p.n) - 6, 'HTTP ' + p.status, 'fill="var(--err)" font-weight="600"');
+  });
+  s += '</svg>';
+  var over = pts.filter(function (p) { return p.n > cap; }).length;
+  var errs = pts.filter(function (p) { return p.status >= 400; }).length;
+  var note = over
+    ? '<div class="callout bad">' + over + ' of ' + pts.length + ' calls left with more than ' + cap + ' calls in the preceding second' +
+      (errs ? ' and ' + errs + ' came back as an error' : '') + '. The gate let more calls out inside one second than the cap allows.</div>'
+    : '<div class="callout good">No call left with more than ' + cap + ' calls in the preceding second: the gate kept every one-second window under the cap.</div>';
+  return '<h3>Calls in any rolling second (sender side)</h3>' +
+    '<div class="muted">Each dot is one outbound call; its height is how many calls left in the 1000 ms before it. The mock counts fixed 1-second windows, so the rolling count is the worst case it could have seen.</div>' +
+    s + note;
+}
+
+// 2.3: usage per row against the 80 % threshold.
+function viewGauges(c, ev) {
+  var rows = arr(c.sqlRows);
+  if (!rows.length) return '';
+  var W = 1000, L = 170, Rp = 60, rowH = 34, T = 18, H = T + rows.length * rowH + 22;
+  var x = scale(0, 100, L, W - Rp);
+  var s = svgOpen(W, H, 'usage per row');
+  [0, 20, 40, 60, 80, 100].forEach(function (v) {
+    s += line(x(v), T - 4, x(v), T + rows.length * rowH, 'var(--grid)');
+    s += '<g class="axis">' + text(x(v), T + rows.length * rowH + 14, v + '%', 'text-anchor="middle"') + '</g>';
+  });
+  rows.forEach(function (r, i) {
+    var cy = T + i * rowH + rowH / 2, hot = r.callCountPct >= 80;
+    s += text(L - 10, cy + 4, r.tenantId, 'text-anchor="end" font-weight="600"');
+    s += rect(x(0), cy - 8, x(100) - x(0), 16, 'var(--chip)');
+    s += rect(x(0), cy - 8, x(r.callCountPct) - x(0), 16, hot ? 'var(--throttle)' : 'var(--sent)',
+              r.tenantId + ': ' + r.callCountPct + '% call_count');
+    s += text(x(r.callCountPct) + 6, cy + 4, r.callCountPct + '%', 'font-weight="600"');
+  });
+  s += line(x(80), T - 8, x(80), T + rows.length * rowH, 'var(--throttle)', 'stroke-width="2" stroke-dasharray="5 3"');
+  s += text(x(80), T - 9, 'throttle at 80%', 'text-anchor="middle" fill="var(--throttle)" font-weight="600" font-size="10"');
+  s += '</svg>';
+  var th = ev.filter(function (e) { return e.kind === 'throttle'; })[0];
+  return '<h3>Usage per stored row &mdash; the guard throttles on max(account, app)</h3>' + s +
+    (th ? '<div class="callout">' + esc(th.tenant) + '\'s call was delayed <b>' + Math.round(th.wait) + ' ms</b> before it left &mdash; its own row is low, the shared app row is not.</div>' : '');
+}
+
+// 2.8: per-tenant class summary next to the observed timeline.
+function viewClasses(c, ev) {
+  var by = {};
+  ev.forEach(function (e) {
+    if (!e.tenant) return;
+    var b = by[e.tenant] || (by[e.tenant] = { calls: 0, waits: 0, maxWait: 0, cls: '', cap: '' });
+    if (e.kind === 'http') b.calls++;
+    if (e.kind === 'gate') { b.waits++; b.maxWait = Math.max(b.maxWait, e.wait); b.cls = e.cls; b.cap = e.cap; }
+  });
+  var guess = { 't-media': 'MediaSend', 't-text': 'TextSend', 't-conv': 'Conversations' };
+  var caps = { MediaSend: 10, TextSend: 100, Conversations: 2 };
+  var rows = Object.keys(by).map(function (k) {
+    var b = by[k], cls = b.cls || guess[k] || '?';
+    return '<tr><td>' + esc(k) + '</td><td>' + esc(cls) + '</td><td class="num">' + (b.cap || caps[cls] || '?') + '/s</td>' +
+      '<td class="num">' + b.calls + '</td><td class="num">' + b.waits + '</td><td class="num">' + (b.waits ? Math.round(b.maxWait) + ' ms' : '&ndash;') + '</td></tr>';
+  }).join('');
+  return '<h3>Per-class pacing</h3><table><tr><th>tenant</th><th>class</th><th class="num">cap</th><th class="num">HTTP calls</th><th class="num">gate waits</th><th class="num">longest wait</th></tr>' + rows + '</table>' +
+    '<div class="muted" style="margin-top:6px">Same <code>/messages</code> endpoint for media and text &mdash; only the payload changes the cap. The mock has no <code>/conversations</code> route, so those calls end in 404 after the gate has already paced them.</div>';
+}
+
+// 3.1 / 3.3: responses per second, by status, plus why requests were (or would be) denied.
+var CODE_COL = { 202: 'var(--c202)', 200: 'var(--c202)', 429: 'var(--c429)', 401: 'var(--c401)', 413: 'var(--c413)', 411: 'var(--c413)', 403: 'var(--c403)' };
+function viewInbound(c) {
+  var io = inboundEvents(c), observe = c.id === '3.3';
+  var counts = c.data && c.data.statusCounts ? c.data.statusCounts : {};
+  var chips = Object.keys(counts).map(function (k) {
+    return '<span class="chip"><b style="color:' + (CODE_COL[k] || 'var(--cother)') + '">HTTP ' + esc(k) + '</b> &times; ' + counts[k] + '</span>';
+  }).join('');
+  var out = '<h3>Simulator result</h3><div class="chips">' + chips +
+    (c.data && c.data.totalSent != null ? '<span class="chip">total ' + c.data.totalSent + '</span>' : '') +
+    (c.data && c.data.avgLatencyMs != null ? '<span class="chip">avg latency ' + c.data.avgLatencyMs + ' ms</span>' : '') + '</div>';
+  if (c.data && c.data.expectedShape) out += '<div class="muted" style="margin-top:6px">Expected shape: ' + esc(c.data.expectedShape) + '</div>';
+  if (!io.decided.length) return out + '<div class="callout">No timestamped ingest decisions were captured, so there is no timeline.</div>';
+
+  // Bin width follows the burst: BurstSingleIp decides 200 requests within tens of milliseconds,
+  // so a fixed one-second bin would collapse the whole story into a single bar.
+  var ts = io.decided.concat(io.deny).map(function (e) { return e.t; });
+  var t0 = Math.min.apply(null, ts), span = Math.max.apply(null, ts) - t0;
+  var binMs = Math.max(1, niceStep(span || 1000, 30));
+  var bins = [], codes = {};
+  io.decided.forEach(function (e) {
+    var i = Math.floor((e.t - t0) / binMs);
+    var b = bins[i] || (bins[i] = {});
+    b[e.status] = (b[e.status] || 0) + 1; codes[e.status] = 1;
+  });
+  var deny = [];
+  io.deny.forEach(function (d) { var i = Math.floor((d.t - t0) / binMs); if (i >= 0) deny[i] = (deny[i] || 0) + 1; });
+  var n = Math.max(bins.length, deny.length);
+  for (var k = 0; k < n; k++) bins[k] = bins[k] || {};
+  var codeList = Object.keys(codes).map(Number).sort();
+  var maxV = 1;
+  bins.forEach(function (b, i) {
+    var tot = 0; codeList.forEach(function (cd) { tot += b[cd] || 0; });
+    maxV = Math.max(maxV, tot, deny[i] || 0);
+  });
+  var W = 1000, L = 50, Rp = 20, T = 12, H = 260, B = H - 34;
+  var bw = (W - L - Rp) / n, y = scale(0, maxV * 1.08, B, T);
+  var s = svgOpen(W, H, 'responses per second');
+  var ystep = niceStep(maxV, 6);
+  for (var v = 0; v <= maxV * 1.08; v += ystep) {
+    s += line(L, y(v), W - Rp, y(v), 'var(--grid)');
+    s += '<g class="axis">' + text(L - 6, y(v) + 4, v, 'text-anchor="end"') + '</g>';
+  }
+  bins.forEach(function (b, i) {
+    var acc = 0, bx = L + i * bw + 1;
+    codeList.forEach(function (cd) {
+      var cnt = b[cd] || 0; if (!cnt) return;
+      s += rect(bx, y(acc + cnt), Math.max(1, bw - 2), y(acc) - y(acc + cnt), CODE_COL[cd] || 'var(--cother)',
+                fmtTick(i * binMs, binMs) + ' to ' + fmtTick((i + 1) * binMs, binMs) + ': ' + cnt + ' ' + TIMES + ' HTTP ' + cd, 'rx="0"');
+      acc += cnt;
+    });
+    if (i % Math.max(1, Math.round(n / 10)) === 0) s += '<g class="axis">' + text(bx, B + 14, fmtTick(i * binMs, binMs), 'text-anchor="middle"') + '</g>';
+  });
+  if (observe && deny.length) {
+    var p = '';
+    for (var j = 0; j < n; j++) p += (j ? 'L' : 'M') + (L + j * bw + bw / 2) + ' ' + y(deny[j] || 0) + ' ';
+    s += '<path d="' + p + '" fill="none" stroke="var(--err)" stroke-width="2.5"/>';
+    for (var q = 0; q < n; q++) if (deny[q]) s += '<circle cx="' + (L + q * bw + bw / 2) + '" cy="' + y(deny[q]) + '" r="3" fill="var(--err)"><title>' + fmtTick(q * binMs, binMs) + ': ' + deny[q] + ' would-be denials logged</title></circle>';
+  }
+  s += '</svg>';
+  var leg = codeList.map(function (cd) { return [CODE_COL[cd] || 'var(--cother)', cd === 202 ? 'accepted (202)' : 'denied ' + cd]; });
+  if (observe) leg.push(['var(--err)', 'would have been denied (logged only)']);
+  out += '<h3>' + (observe ? 'Every request passed &mdash; the red line is what enforce mode would have rejected' : 'Decisions over time, as the ingest API made them') + '</h3>' +
+    '<div class="muted">Each bar is ' + fmtMs(binMs) + ' of the burst (' + io.decided.length + ' decisions over ' + fmtMs(span) +
+    '), timed by the ingest API\'s own log.</div>' + legend(leg) + s;
+
+  var reasons = {};
+  io.deny.forEach(function (d) { var key = d.reason + ' ' + ARROW + ' ' + d.status; reasons[key] = (reasons[key] || 0) + 1; });
+  var rk = Object.keys(reasons);
+  if (rk.length) {
+    var maxR = Math.max.apply(null, rk.map(function (k2) { return reasons[k2]; }));
+    out += '<h3>' + (observe ? 'Which rule would have denied them' : 'Which rule denied them') + '</h3><table>' +
+      rk.map(function (k2) {
+        return '<tr><td style="width:180px">' + esc(k2) + '</td><td><div style="background:var(--c429);height:12px;border-radius:3px;width:' +
+          Math.max(2, 100 * reasons[k2] / maxR) + '%"></div></td><td class="num" style="width:60px">' + reasons[k2] + '</td></tr>';
+      }).join('') + '</table>';
+  }
+  return out;
+}
+
+// 3.2: the rule pipeline with this run's two requests drawn through their bypass.
+function viewPipeline(c) {
+  var health = c.data && c.data.health, get = c.data && c.data.get;
+  var steps = ['GET?', 'Excluded path?', 'Block list 403', 'Allow list', 'Payload 413/411', 'HMAC 401',
+               'Global 429', 'Per-IP 429', 'Per-client 429', 'Concurrency 429', 'Endpoint'];
+  var W = 1000, H = 230, bw = 80, gap = (W - 20 - steps.length * bw) / (steps.length - 1), y0 = 70;
+  var s = svgOpen(W, H, 'inbound rule pipeline');
+  s += '<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--muted)"/></marker></defs>';
+  steps.forEach(function (st, i) {
+    var x = 10 + i * (bw + gap), bypass = i < 2;
+    s += rect(x, y0, bw, 40, bypass ? 'var(--chip)' : 'var(--panel)', '', 'stroke="' + (bypass ? 'var(--info)' : 'var(--line)') + '" stroke-width="1.5"');
+    var words = st.split(' ');
+    s += text(x + bw / 2, y0 + (words.length > 1 ? 17 : 24), words[0], 'text-anchor="middle" font-size="10.5" font-weight="600"');
+    if (words.length > 1) s += text(x + bw / 2, y0 + 31, words.slice(1).join(' '), 'text-anchor="middle" font-size="10" class="sub"');
+    if (i < steps.length - 1) s += line(x + bw, y0 + 20, x + bw + gap, y0 + 20, 'var(--muted)', 'marker-end="url(#ah)"');
+  });
+  var endX = 10 + (steps.length - 1) * (bw + gap) + bw / 2;
+  function route(i, yy, label, code, ok) {
+    var x = 10 + i * (bw + gap) + bw / 2, col = ok ? 'var(--pass)' : 'var(--fail)';
+    return '<path d="M' + x + ' ' + (y0 + 40) + ' L' + x + ' ' + yy + ' L' + endX + ' ' + yy + ' L' + endX + ' ' + (y0 + 42) + '" fill="none" stroke="' + col + '" stroke-width="2.5" marker-end="url(#ah)"/>' +
+      text(x + 6, yy - 6, label + '  ' + ARROW + '  bypass, no counter touched', 'fill="' + col + '" font-weight="600"') +
+      text(endX - 6, yy - 6, 'HTTP ' + (code || '?'), 'text-anchor="end" fill="' + col + '" font-weight="700"');
+  }
+  s += route(0, 150, 'GET /anything', get, get === '404');
+  s += route(1, 200, 'POST /health (unsigned)', health, health === '200');
+  s += text(10, 30, 'Rules run left to right, first decision wins. Both requests leave the pipeline before any rule can deny them.', 'class="sub"');
+  return '<h3>Path through the inbound pipeline</h3>' + s +
+    '<div class="muted">GET /anything ending in 404 is the success case: it reached routing instead of being rate-limited. POST /health has no HMAC signature and still gets 200 because excluded paths skip every rule.</div>';
+}
+
+// ------------------------------------------------------------------ mechanism panels
+// What each use case's outcome is produced BY. Static text describes the code (keep it in step
+// with it); `run` computes a one-line proof from this run's own data, or returns '' when the run
+// did not capture what it needs.
+
+function firstEv(ev, kind, pred) {
+  return ev.filter(function (e) { return e.kind === kind && (!pred || pred(e)); })[0];
+}
+function blockRun(ev) {
+  var r = firstEv(ev, 'rlerror') || firstEv(ev, 'http429');
+  var b = firstEv(ev, 'block'), p = firstEv(ev, 'pause'), h = firstEv(ev, 'held');
+  var parts = [];
+  if (r && r.kind === 'rlerror') parts.push('error <b>' + r.code + (r.sub ? '/' + r.sub : '') + '</b> classified <b>' + esc(r.level) + '</b>-level, wait ' + r.minutes + ' min');
+  if (r && r.kind === 'http429') parts.push('<b>Retry-After</b> header ' + ARROW + ' ' + r.minutes + ' min');
+  if (b) parts.push('block written to <b>' + esc(b.tenant) + '</b> for ' + b.minutes + ' + 1 min');
+  if (p) parts.push('queue for ' + esc(p.tenant) + ' paused ' + fmtMs(p.dur) + ', then re-queued');
+  if (h) parts.push('<b>' + esc(h.tenant) + '</b> held with no HTTP call');
+  return parts.join(' ' + ARROW + ' ');
+}
+
+var MECH = {
+  '2.1': {
+    name: 'Sliding-window log (reservation style)',
+    layer: 'Outbound \u00b7 proactive \u00b7 last pre-flight gate before the HTTP call',
+    how: ['Per tenant <i>and</i> call class, the gate remembers the dispatch times of the last N calls (N = the cap).',
+          'A new call may leave at max(now, oldest of those N + 1 s); the gate returns that wait and the guard sleeps it.',
+          'So any N+1 consecutive calls span at least one second: never more than N in <i>any</i> second, cold start included. A burst up to N still leaves at once.'],
+    params: ['PerSecondDispatchLimit (text) = 100 by default'],
+    code: ['PerSecondDispatchGate.Reserve', 'InstagramThrottleGuard.EnforceAsync'],
+    run: function (c, ev) {
+      var t = param(c, 'tenant id') || 'ps-tenant', cap = param(c, 'sender text-class gate (calls/s)');
+      var calls = ev.filter(function (e) { return e.kind === 'http' && e.tenant === t; }).map(function (e) { return e.t; });
+      if (!calls.length) return '';
+      var most = Math.max.apply(null, calls.map(function (s) { return calls.filter(function (x) { return x >= s && x < s + 1000; }).length; }));
+      var errs = ev.filter(function (e) { return e.kind === 'rlerror'; }).length;
+      var s = 'Busiest one-second span: <b>' + most + '</b> calls against a gate of ' + esc(cap) + '/s and a mock cap of ' +
+        esc(param(c, 'mock cap (calls/s)')) + '/s ' + ARROW + ' ' + (errs ? '<b>' + errs + ' rate-limit error(s)</b>' : '<b>no rate-limit errors</b>') + '.';
+      // Timed at the HTTP-send log line, which trails the gate's slot by a variable few ms (the
+      // first call after a start pays warm-up). Say so rather than let it read as a gate breach.
+      if (+cap && most > +cap)
+        s += ' The count exceeds the gate because it is timed where the HTTP request is logged, a few ms after the gate hands out the slot. ' +
+             'The first call after a start is the slowest to get there, so the wire can see the gate\'s exact one-second spacing compressed slightly. ' +
+             'That jitter is why the gate runs one below the mock\'s cap.';
+      return s;
+    }
+  },
+  '2.2': {
+    name: 'Server-directed backoff (Retry-After) + persisted block window',
+    layer: 'Outbound \u00b7 reactive \u00b7 response handler, then Polly / queue',
+    how: ['Any HTTP 429 counts as rate-limited, whatever the error code says.',
+          'The <code>Retry-After</code> header (seconds or HTTP-date) is rounded up to minutes, minimum 1, and written as <code>BlockedUntilUtc</code> = now + wait + 1 min buffer.',
+          'Polly retries inline only if the wait fits in 2 min; otherwise the queue pauses this tenant and re-queues the job. Meta says stop calling, so we do not probe.'],
+    params: ['MaxInlineRetryDelay = 2 min', 'buffer = +1 min'],
+    code: ['InstagramRateLimitHandler.RetryAfterMinutesFromHeader', 'TenantRateLimitService.RecordUsageAsync', 'SendQueueWorker'],
+    run: function (c, ev) { return blockRun(ev); }
+  },
+  '2.3': {
+    name: 'Usage-percentage throttle over a shared budget (two-level state)',
+    layer: 'Outbound \u00b7 proactive \u00b7 first pre-flight gate',
+    how: ['<code>X-App-Usage</code> is stored only on the shared <code>app:{AppId}</code> row; BUC usage only on the account\'s own row.',
+          'Before each call: effective % = max(account %, app %).',
+          'At 80 % or above, the call waits 3,600,000 / (remaining % &times; 48) ms, clamped to 200 ms &ndash; 60 s, spreading what is left of the budget over the hour.'],
+    params: ['threshold = 80 %', 'delay clamp = 200 ms &ndash; 60 s'],
+    code: ['TenantRateLimitService.GetThrottleDelayAsync', 'HeaderUsageThrottleGate', 'InstagramRateLimitHandler (L1/L2 split)'],
+    run: function (c, ev) {
+      var th = firstEv(ev, 'throttle');
+      var app = arr(c.sqlRows).filter(function (r) { return r.tenantId.indexOf('app:') === 0; })[0];
+      if (!th || !app) return '';
+      var own = arr(c.sqlRows).filter(function (r) { return r.tenantId === th.tenant; })[0];
+      var eff = Math.max(app.callCountPct, own ? own.callCountPct : 0);
+      return '<b>' + esc(th.tenant) + '</b>: own ' + (own ? own.callCountPct : 0) + ' %, app ' + app.callCountPct + ' % ' + ARROW + ' effective ' + eff +
+        ' % ' + ARROW + ' 3,600,000 / (' + (100 - eff) + ' &times; 48) = <b>' + Math.round(3600000 / ((100 - eff) * 48)) + ' ms</b>; the log shows ' + Math.round(th.wait) + ' ms.';
+    }
+  },
+  '2.4': {
+    name: 'Both outbound layers together (watch only)',
+    layer: 'Outbound \u00b7 proactive throttle + reactive blocks',
+    how: ['The usage-percentage throttle slows calls as usage climbs.', 'Error codes and the BUC ETA set block windows.', 'The queue pauses and resumes per tenant.'],
+    params: [], code: ['TenantRateLimitService', 'InstagramRateLimitHandler', 'SendQueueWorker'],
+    run: function () { return ''; }
+  },
+  '2.5': {
+    name: 'Error-code classification \u2192 account-scoped block window',
+    layer: 'Outbound \u00b7 reactive \u00b7 response handler',
+    how: ['The error body\'s code is matched against the known rate-limit codes [4, 17, 32, 613, 80001, 80002, 80006]. On HTTP 400 with no header, this list is the only signal.',
+          '80002 (Instagram BUC) is account-level, so the block goes on the tenant\'s own row and the shared app row is untouched.',
+          'Wait = max(body ETA, BUC-header ETA, 1-min floor), + 1 min buffer; the queue pauses that tenant only.'],
+    params: ['code = 80002', 'level = account', 'floor = 1 min'],
+    code: ['InstagramRateLimitHandler.RateLimitErrorCodes', 'TenantRateLimitService.RecordUsageAsync'],
+    run: function (c, ev) { return blockRun(ev); }
+  },
+  '2.6': {
+    name: 'Subcode-specific backoff floor \u2192 app-scoped block window',
+    layer: 'Outbound \u00b7 reactive \u00b7 response handler',
+    how: ['613 is a recognised rate-limit code and an <i>app-level</i> one, so the block goes on <code>app:{AppId}</code>.',
+          'Subcode 1996 means Meta flagged the shape of our traffic and gives no wait time. A 1-minute floor would walk straight back in, so this subcode gets a 15-minute floor.',
+          '+1 min buffer as usual; every tenant\'s next call is held by the app block.'],
+    params: ['code/subcode = 613/1996', 'floor = 15 min', 'level = app'],
+    code: ['InstagramRateLimitHandler (InconsistentVolumeSubcode)', 'AppLevelErrorCodes = [4, 613]'],
+    run: function (c, ev) { return blockRun(ev); }
+  },
+  '2.7': {
+    name: 'App-wide block (shared circuit) with asymmetric clearing',
+    layer: 'Outbound \u00b7 reactive (record) + proactive (enforce)',
+    how: ['Code 4 is app-level: the block goes on <code>app:{AppId}</code>, and the account that received it is not blocked.',
+          'Before any call, the first pre-flight gate checks the app row as well as the tenant row. A live app block throws before the HTTP call, and the job is re-queued.',
+          'Clearing is asymmetric: an account\'s success clears its own block but never the app block, which expires on its own <code>BlockedUntilUtc</code>.'],
+    params: ['code = 4', 'level = app'],
+    code: ['TenantRateLimitService.GetThrottleDelayAsync', 'InstagramRateLimitHandler (block routing)'],
+    run: function (c, ev) { return blockRun(ev); }
+  },
+  '2.8': {
+    name: 'Payload-aware classifier + one sliding-window log per class',
+    layer: 'Outbound \u00b7 proactive \u00b7 classify, then last pre-flight gate',
+    how: ['<code>DispatchClassifier</code> reads the endpoint <i>and</i> the payload: <code>/messages</code> with an audio/video attachment is MediaSend, otherwise TextSend; <code>/conversations</code> is Conversations; anything unrecognised gets the tightest cap.',
+          'Each tenant+class pair has its own sliding-window log, so caps never borrow from each other.',
+          'Same mechanism as 2.1; only N differs: text 100, media 10, conversations 2.'],
+    params: ['text = 100/s', 'media = 10/s', 'conversations = 2/s', 'unclassified = 2/s'],
+    code: ['DispatchClassifier.Classify', 'PerSecondDispatchGate.RateFor'],
+    run: function (c, ev) {
+      var w = {};
+      ev.forEach(function (e) { if (e.kind === 'gate') w[e.cls] = (w[e.cls] || 0) + 1; });
+      var calls = function (t) { return ev.filter(function (e) { return e.kind === 'http' && e.tenant === t; }).length; };
+      return 'Waits by class: MediaSend <b>' + (w.MediaSend || 0) + '</b> of ' + calls('t-media') + ', TextSend <b>' + (w.TextSend || 0) + '</b> of ' +
+        calls('t-text') + ', Conversations <b>' + (w.Conversations || 0) + '</b> of ' + calls('t-conv') + '. Same endpoint for media and text; only the payload changed the cap.';
+    }
+  },
+  '3.1': {
+    name: 'Fail-fast rule pipeline + sliding-window log counters + concurrency semaphore',
+    layer: 'Inbound \u00b7 ASP.NET Core middleware, before routing',
+    how: ['Rules run cheapest-first and the first decision wins: block list 403 &rarr; allow list &rarr; payload size 413 &rarr; HMAC 401 &rarr; global &rarr; per-IP &rarr; per-client &rarr; concurrency.',
+          'Counted scopes use an exact sliding-window log (a queue of timestamps; expired entries drop out on every call): global 1000 + 20 burst, <b>per-IP 60</b> (no burst), per-client 100 + 20 burst, per minute.',
+          'Concurrency is a non-blocking <code>SemaphoreSlim</code> per client (10 slots), released when the response completes. That is what stops slow-drip traffic.'],
+    params: ['window = 60 s', 'per-IP = 60', 'global = 1000 + 20', 'per-client = 100 + 20', 'concurrency = 10'],
+    code: ['InboundRateLimitPipeline.EvaluateAsync', 'SlidingWindowStrategy.Acquire', 'ConcurrencyRule'],
+    run: function (c) {
+      var io = inboundEvents(c), by = {};
+      io.deny.forEach(function (d) { if (!d.observe) by[d.reason] = (by[d.reason] || 0) + 1; });
+      var acc = io.decided.filter(function (d) { return d.status === 202; }).length;
+      if (!acc && !Object.keys(by).length) return '';
+      var s = 'Accepted <b>' + acc + '</b>; denied ' + Object.keys(by).map(function (k) { return k + ' ' + by[k]; }).join(', ') + '.';
+      if (by.Concurrency && by.Ip) s += ' Why ' + acc + ' and not 60: counters run before the concurrency rule, so the <b>' + by.Concurrency +
+        '</b> concurrency denials had already spent per-IP slots &mdash; ' + acc + ' + ' + by.Concurrency + ' = <b>' + (acc + by.Concurrency) + '</b> = the per-IP limit.';
+      return s;
+    }
+  },
+  '3.2': {
+    name: 'Bypass predicate ahead of the pipeline',
+    layer: 'Inbound \u00b7 middleware entry, before any rule or counter',
+    how: ['Any GET returns straight to routing, because Meta\'s <code>hub.challenge</code> webhook verification is a GET and must never be throttled.',
+          'A path matching <code>ExcludedPaths</code> (prefix, here <code>/health</code>) skips every rule, HMAC included.',
+          'Bypassed requests never touch a counter, so they cannot be starved by a flood and cannot spend anyone\'s quota.'],
+    params: ['ExcludedPaths = /health', 'GET = always bypassed'],
+    code: ['InboundRateLimitMiddleware.IsBypassed'],
+    run: function (c) {
+      var d = c.data || {};
+      return 'GET /anything &rarr; <b>' + esc(d.get) + '</b> (reached routing) &middot; unsigned POST /health &rarr; <b>' + esc(d.health) + '</b> (pipeline skipped).';
+    }
+  },
+  '3.3': {
+    name: 'Shadow mode (dry run): full evaluation, enforcement skipped',
+    layer: 'Inbound \u00b7 middleware, after evaluation',
+    how: ['The same pipeline and counters as 3.1 run in full for every request.',
+          'On a deny, the status enforcement <i>would</i> send is computed by the same mapping enforcement uses, then logged as <code>OBSERVE ONLY</code>.',
+          'The request continues anyway. Because the logged numbers are the real ones, a week of this picks production thresholds from real traffic.'],
+    params: ['ObserveOnly = true', 'limits as in 3.1'],
+    code: ['InboundRateLimitMiddleware.InvokeAsync (ObserveOnly branch)'],
+    run: function (c) {
+      var io = inboundEvents(c), by = {};
+      io.deny.forEach(function (d) { if (d.observe) by[d.reason] = (by[d.reason] || 0) + 1; });
+      var acc = io.decided.filter(function (d) { return d.status === 202; }).length;
+      var keys = Object.keys(by);
+      if (!keys.length) return '';
+      var tot = keys.reduce(function (a, k) { return a + by[k]; }, 0);
+      return 'Accepted <b>' + acc + '</b>, rejected <b>0</b>; enforce mode would have denied <b>' + tot + '</b> (' +
+        keys.map(function (k) { return k + ' ' + by[k]; }).join(', ') + '), the same split 3.1 enforced.';
+    }
+  }
+};
+
+function mechPanel(c, ev) {
+  var m = MECH[c.id];
+  if (!m) return '';
+  var run = '';
+  try { run = m.run(c, ev); } catch (e) { run = ''; }
+  return '<div class="mech"><div class="k">Mechanism</div><div class="name">' + m.name + '</div>' +
+    '<div class="layer">' + m.layer + '</div>' +
+    '<ol>' + m.how.map(function (h) { return '<li>' + h + '</li>'; }).join('') + '</ol>' +
+    (run ? '<div class="run"><b>In this run:</b> ' + run + '</div>' : '') +
+    '<div class="meta2">' + m.params.map(function (p) { return '<span class="chip">' + p + '</span>'; }).join('') +
+    m.code.map(function (k) { return '<span class="chip"><code>' + esc(k) + '</code></span>'; }).join('') + '</div></div>';
+}
+
+// ------------------------------------------------------------------ tables + raw logs
+
+function sqlTable(c) {
+  var rows = arr(c.sqlRows);
+  if (!rows.length) return '';
+  return '<h3>TenantRateLimitState rows at the end of the case</h3><table><tr><th>TenantId</th><th class="num">call_count %</th><th class="num">total_time %</th><th class="num">cpu %</th><th>BlockedUntilUtc</th><th class="num">blocked for (from case start)</th></tr>' +
+    rows.map(function (r) {
+      return '<tr><td>' + esc(r.tenantId) + '</td><td class="num">' + r.callCountPct + '</td><td class="num">' + r.totalTimePct + '</td><td class="num">' + r.cpuTimePct +
+        '</td><td>' + (r.blockedUntilUtc ? esc(r.blockedUntilUtc) : '<span class="muted">NULL</span>') + '</td><td class="num">' +
+        (r.blockedUntilMs != null ? fmtMs(r.blockedUntilMs) : '&ndash;') + '</td></tr>';
+    }).join('') + '</table>';
+}
+function mockTable(c) {
+  var ms = c.mockState || {}, keys = Object.keys(ms);
+  if (!keys.length) return '';
+  return '<h3>Mock (pretend Instagram) state</h3><table><tr><th>tenant</th><th>blocked</th><th class="num">call_count %</th><th class="num">error code</th><th class="num">subcode</th></tr>' +
+    keys.map(function (k) {
+      var s = ms[k] || {};
+      return '<tr><td>' + esc(k) + '</td><td>' + (s.isBlocked ? '<b style="color:var(--fail)">yes</b>' : 'no') + '</td><td class="num">' + esc(s.callCountPct) +
+        '</td><td class="num">' + esc(s.returnErrorCode) + '</td><td class="num">' + esc(s.returnErrorSubcode) + '</td></tr>';
+    }).join('') + '</table>';
+}
+function rawLogs(c) {
+  var out = '';
+  ['sender', 'ingest', 'sim', 'mock'].forEach(function (k) {
+    var lines = arr(c.logs && c.logs[k]);
+    if (!lines.length) return;
+    var shown = lines.length > 400 ? lines.slice(0, 400).concat(['... ' + (lines.length - 400) + ' more lines']) : lines;
+    out += '<details><summary>' + esc(k) + ' log &mdash; ' + lines.length + ' lines during this case</summary><pre>' + esc(shown.join('\n')) + '</pre></details>';
+  });
+  return out;
+}
+
+// ------------------------------------------------------------------ assembly
+
+function renderCase(c, idx) {
+  var v = verdict(c), ev = senderEvents(c), body = '';
+  var ts = hasTimestamps(c);
+  if (!ts && c.dir.indexOf('OUTBOUND') === 0)
+    body += '<div class="callout bad">The logs for this case carry no timestamps, so there is no timeline. Services started outside the runner (attach mode) use the default log format.</div>';
+
+  switch (c.id) {
+    case '2.1': body += viewRate(c, ev) + viewObserved(c, ev); break;
+    case '2.2': case '2.5': case '2.6': case '2.7':
+      body += viewObserved(c, ev, 'The first seconds (observed)') + viewBlocks(c, ev); break;
+    case '2.3': body += viewGauges(c, ev) + viewObserved(c, ev); break;
+    case '2.8': body += viewObserved(c, ev, 'Three bursts, same endpoint, different caps') + viewClasses(c, ev); break;
+    case '3.1': case '3.3': body += viewInbound(c); break;
+    case '3.2': body += viewPipeline(c); break;
+    default: body += viewObserved(c, ev);
+  }
+
+  var params = arr(c.params).map(function (p) { return '<span class="chip">' + esc(p.name) + ' = <b>' + esc(p.value) + '</b></span>'; }).join('');
+  var checks = arr(c.checks);
+  var checkHtml = checks.length
+    ? '<h3>Assertions</h3><ul class="checks">' + checks.map(function (k) { return '<li class="' + (k.pass ? 'ok' : 'no') + '">' + esc(k.text) + '</li>'; }).join('') + '</ul>'
+    : '<h3>Assertions</h3><div class="muted">None &mdash; this use case is observed, not asserted.</div>';
+
+  return '<section class="panel" id="case-' + idx + '">' +
+    '<div class="case-head"><div><h2>' + esc(c.id) + ' &mdash; ' + esc(c.title) + '</h2>' +
+    '<div class="flow">' + esc(c.dir) + ' &middot; started ' + esc(c.started) + ' &middot; ' + fmtMs(c.durationMs) + '</div></div>' +
+    '<span class="badge b-' + v + '">' + v + '</span></div>' +
+    '<ul class="plain">' + arr(c.plain).map(function (p) { return '<li>' + esc(p) + '</li>'; }).join('') + '</ul>' +
+    (c.note ? '<div class="muted" style="margin-top:4px">' + esc(c.note) + '</div>' : '') +
+    (params ? '<div class="chips">' + params + '</div>' : '') +
+    (c.error ? '<div class="callout bad">Aborted: ' + esc(c.error) + '</div>' : '') +
+    mechPanel(c, ev) +
+    body + checkHtml + sqlTable(c) + mockTable(c) + rawLogs(c) +
+    '</section>';
+}
+
+function render() {
+  var cases = arr(R.cases);
+  document.getElementById('runmeta').innerHTML =
+    '<span>started ' + esc(R.started) + '</span><span>updated ' + esc(R.updated) + '</span>' +
+    '<span>mode: ' + esc(R.mode) + '</span><span>Graph ' + esc(R.graphVersion) + ' (local mock only)</span>';
+
+  var pass = cases.filter(function (c) { return c.result === 'PASS'; }).length;
+  var fail = cases.filter(function (c) { return c.result === 'FAIL' || c.result === 'ABORTED'; }).length;
+  var obs = cases.length - pass - fail;
+  var rows = cases.map(function (c, i) {
+    var ch = arr(c.checks), ok = ch.filter(function (k) { return k.pass; }).length;
+    return '<tr><td><a href="#case-' + i + '">' + esc(c.id) + '</a></td><td>' + esc(c.title) +
+      (MECH[c.id] ? '<br><span class="mtag">' + MECH[c.id].name + '</span>' : '') + '</td><td>' +
+      esc(c.dir.split(' - ')[0]) + '</td><td><span class="badge b-' + verdict(c) + '">' + verdict(c) + '</span></td><td class="num">' +
+      (ch.length ? ok + '/' + ch.length : '&ndash;') + '</td><td class="num">' + fmtMs(c.durationMs) + '</td></tr>';
+  }).join('');
+  document.getElementById('summary').innerHTML =
+    '<h2>Summary</h2><div class="chips"><span class="chip"><b style="color:var(--pass)">' + pass + '</b> passed</span>' +
+    '<span class="chip"><b style="color:var(--fail)">' + fail + '</b> failed</span><span class="chip"><b style="color:var(--info)">' + obs + '</b> observed only</span></div>' +
+    '<table style="margin-top:10px"><tr><th>id</th><th>use case &middot; mechanism</th><th>direction</th><th>result</th><th class="num">checks</th><th class="num">duration</th></tr>' + rows + '</table>';
+
+  document.getElementById('cases').innerHTML = cases.map(function (c, i) {
+    try { return renderCase(c, i); }
+    catch (e) { return '<section class="panel"><h2>' + esc(c.id) + '</h2><div class="callout bad">Could not draw this case: ' + esc(e.message) + '</div>' + rawLogs(c) + '</section>'; }
+  }).join('');
+}
+
+document.getElementById('theme').addEventListener('click', function () {
+  var root = document.documentElement;
+  var dark = root.getAttribute('data-theme') === 'dark' ||
+    (!root.getAttribute('data-theme') && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  root.setAttribute('data-theme', dark ? 'light' : 'dark');
+});
+
+render();
+})();
+</script>
+</body>
+</html>

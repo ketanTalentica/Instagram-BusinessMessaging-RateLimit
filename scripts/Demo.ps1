@@ -29,6 +29,20 @@ $Root    = Split-Path $PSScriptRoot -Parent
 $LogDir  = Join-Path $Root 'logs'
 $TempDir = Join-Path $env:TEMP 'ratelimit-demo'
 
+# One self-contained HTML report per runner session, rewritten after every use case so an
+# interrupted session still leaves a complete file. Data goes in as JSON; the template draws it.
+$ReportDir      = Join-Path $Root 'reports'
+$ReportTemplate = Join-Path $PSScriptRoot 'report-template.html'
+
+# Applied to every service the runner starts. The report places events on a timeline, which
+# the default console format cannot support: it prints no time and splits each entry over two
+# lines. Env vars only - checked-in appsettings stay untouched.
+$ReportLogEnv = @{
+    'Logging__Console__FormatterName'                    = 'simple'
+    'Logging__Console__FormatterOptions__TimestampFormat' = 'HH:mm:ss.fff '
+    'Logging__Console__FormatterOptions__SingleLine'      = 'true'
+}
+
 $MockUrl   = 'http://localhost:5020'
 $SenderUrl = 'http://localhost:5001'
 $IngestUrl = 'http://localhost:5002'
@@ -164,6 +178,8 @@ $script:Auto            = $false  # true = take every default, never prompt
 $script:Results         = @()     # accumulated PASS/FAIL rows for the summary
 $script:GraphVersion    = 'v25.0' # replaced by Assert-MockOnly from live config
 $script:HasSqlCmd       = $false
+$script:Case            = $null   # the use case being captured for the report, while one runs
+$script:Report          = $null   # this session's report: file path + every captured case
 
 # ------------------------------------------- output helpers ----------------------------------
 
@@ -182,10 +198,14 @@ function Write-Dim ([string]$Text) { Write-Host "       $Text" -ForegroundColor 
 function Ask {
     param([string]$Prompt, $Default)
     $d = [string]$Default
-    if ($script:Auto) { Write-Dim "$Prompt = $d"; return $d }
-    $answer = Read-Host "  $Prompt [$d]"
-    if ([string]::IsNullOrWhiteSpace($answer)) { return $d }
-    return $answer.Trim()
+    $value = $d
+    if ($script:Auto) { Write-Dim "$Prompt = $d" }
+    else {
+        $answer = Read-Host "  $Prompt [$d]"
+        if (-not [string]::IsNullOrWhiteSpace($answer)) { $value = $answer.Trim() }
+    }
+    if ($script:Case) { [void]$script:Case.Params.Add([ordered]@{ name = $Prompt; value = $value }) }
+    return $value
 }
 
 function Ask-Int {
@@ -276,7 +296,7 @@ function Prompt-NextDemo([string]$CurrentId) {
 function Invoke-DemoChain([string]$StartId) {
     $id = $StartId
     while ($id) {
-        try { & $DemoCatalog[$id].Fn }
+        try { Invoke-UseCase $id }
         catch {
             Write-Err "use case $id could not run: $($_.Exception.Message)"
             return   # back to the menu rather than chaining on top of a broken state
@@ -410,6 +430,11 @@ function Start-OneService {
 
     $outLog = Log-Path $Key
     $errLog = Join-Path $LogDir "$Key.err.log"
+
+    # The old log is about to be deleted. Mid-case restarts are routine (3.3 restores enforce
+    # mode at its very end), so keep this case's lines before they go.
+    Save-CaseLog $Key
+
     foreach ($f in @($outLog, $errLog)) {
         if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
     }
@@ -417,6 +442,7 @@ function Start-OneService {
     # Child processes inherit this process's environment block, so set the overrides here,
     # launch, then restore - that keeps one demo's override from leaking into the next.
     $desired = @{ 'ASPNETCORE_ENVIRONMENT' = 'Development' }
+    foreach ($e in $ReportLogEnv.GetEnumerator()) { $desired[$e.Name] = $e.Value }
     if ($EnvOverrides) { foreach ($e in $EnvOverrides.GetEnumerator()) { $desired[$e.Name] = [string]$e.Value } }
 
     $script:ServiceEnvValues[$Key] = $EnvOverrides   # remembered so a reset can rebuild identically
@@ -605,6 +631,7 @@ function Show-MockState([string]$Tenant) {
     $raw = & curl.exe -s -m 10 "$MockUrl/simulator/state/$Tenant" 2>$null
     if (-not $raw) { Write-Dim "mock has no state for $Tenant"; return }
     $s = $raw | ConvertFrom-Json
+    if ($script:Case) { $script:Case.MockState[$Tenant] = $s }
     Write-Dim ("mock $Tenant -> isBlocked=$($s.isBlocked) callCountPct=$($s.callCountPct) " +
                "errorCode=$($s.returnErrorCode) subcode=$($s.returnErrorSubcode)")
 }
@@ -670,11 +697,14 @@ function Assert-Log {
         $hit = @($lines | Where-Object { $_ -match $regex })
 
         if ($negate) {
-            if ($hit.Count -eq 0) { Write-Ok "absent: $regex" }
-            else { Write-Err "should be absent, found $($hit.Count)x: $regex"; $pass = $false }
+            if ($hit.Count -eq 0) { Write-Ok "absent: $regex"; Add-Check "absent: $regex" $true }
+            else {
+                Write-Err "should be absent, found $($hit.Count)x: $regex"; $pass = $false
+                Add-Check "should be absent, found $($hit.Count)x: $regex" $false
+            }
         } else {
-            if ($hit.Count -gt 0) { Write-Ok "$regex  ($($hit.Count)x)" }
-            else { Write-Err "missing: $regex"; $pass = $false }
+            if ($hit.Count -gt 0) { Write-Ok "$regex  ($($hit.Count)x)"; Add-Check "$regex  ($($hit.Count)x)" $true }
+            else { Write-Err "missing: $regex"; $pass = $false; Add-Check "missing: $regex" $false }
         }
     }
     return [bool]$pass
@@ -684,9 +714,154 @@ function Record-Result([string]$Demo, [bool]$Pass) {
     $verdict = 'FAIL'
     if ($Pass) { $verdict = 'PASS' }
     $script:Results += New-Object psobject -Property @{ Demo = $Demo; Result = $verdict }
+    if ($script:Case) { $script:Case.Result = $verdict }
     Write-Host ''
     if ($Pass) { Write-Host "  == $Demo : PASS ==" -ForegroundColor Green }
     else       { Write-Host "  == $Demo : FAIL ==" -ForegroundColor Red }
+}
+
+# ------------------------------------------- visual report -----------------------------------
+
+# Each use case is captured between Start-CaseCapture and Complete-CaseCapture: the parameters
+# asked for, every check, the slice of each service log the case produced, the SQL rows and
+# mock state it left behind. scripts\report-template.html turns that into charts. Capturing
+# must never break a demo, so every failure here degrades to a warning.
+
+function Add-Check([string]$Text, [bool]$Pass) {
+    if ($script:Case) { [void]$script:Case.Checks.Add([ordered]@{ text = $Text; pass = $Pass }) }
+}
+
+function Set-CaseData([string]$Name, $Value) {
+    if ($script:Case) { $script:Case.Data[$Name] = $Value }
+}
+
+# Appends this case's lines from one service log and resets the mark. Called at case end, and by
+# Start-OneService just before it deletes the log of a service it is restarting.
+function Save-CaseLog([string]$Key) {
+    if (-not $script:Case) { return }
+    $lines = @(Get-LogSince $Key $script:Case.Marks[$Key] | Where-Object { $_ -match '\S' })
+    if ($lines.Count -gt 0) { $script:Case.Logs[$Key].AddRange([object[]]$lines) }
+    $script:Case.Marks[$Key] = 0
+}
+
+function Start-CaseCapture([string]$Id) {
+    if (-not $script:Report) {
+        if (-not (Test-Path -LiteralPath $ReportDir)) { New-Item -ItemType Directory -Path $ReportDir | Out-Null }
+        $started = Get-Date
+        $mode = 'interactive'
+        if ($Run) { $mode = "-Run $Run" }
+        $script:Report = @{
+            File      = Join-Path $ReportDir ('run-' + $started.ToString('yyyyMMdd-HHmmss') + '.html')
+            Started   = $started.ToString('yyyy-MM-dd HH:mm:ss')
+            Mode      = $mode
+            Cases     = New-Object System.Collections.ArrayList
+            Announced = $false
+        }
+    }
+
+    $now = Get-Date
+    $marks = @{}; $logs = @{}
+    foreach ($key in $Services.Keys) {
+        $marks[$key] = Get-LogMark $key
+        $logs[$key]  = New-Object System.Collections.ArrayList
+    }
+    $script:Case = @{
+        Id = $Id; Started = $now; Marks = $marks; Logs = $logs
+        Params = New-Object System.Collections.ArrayList
+        Checks = New-Object System.Collections.ArrayList
+        MockState = @{}; Data = @{}; Result = $null
+    }
+}
+
+# TenantRateLimitState with block times converted to ms relative to the case start, so the
+# report can place them on the same axis as the (local-time) log lines.
+function Get-ReportSqlRows([datetime]$StartUtc) {
+    $rows = @()
+    if (-not $script:HasSqlCmd) { return $rows }
+    $q = "SET NOCOUNT ON; SELECT TenantId + '|' + CAST(MaxCallCountPct AS varchar(10)) + '|' + " +
+         "CAST(MaxTotalTimePct AS varchar(10)) + '|' + CAST(MaxTotalCpuTimePct AS varchar(10)) + '|' + " +
+         "ISNULL(CONVERT(varchar(30), BlockedUntilUtc, 126), '') + '|' + CONVERT(varchar(30), LastUpdatedUtc, 126) " +
+         "FROM TenantRateLimitState ORDER BY TenantId;"
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    $utc = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+    foreach ($line in @(Invoke-Sql $q)) {
+        if ("$line" -notmatch '\|') { continue }
+        $p = "$line".Trim() -split '\|'
+        if ($p.Count -lt 6) { continue }
+        $blockedMs = $null
+        if ($p[4]) { $blockedMs = [math]::Round(([datetime]::Parse($p[4], $inv, $utc) - $StartUtc).TotalMilliseconds) }
+        $rows += [ordered]@{
+            tenantId = $p[0]; callCountPct = [int]$p[1]; totalTimePct = [int]$p[2]; cpuTimePct = [int]$p[3]
+            blockedUntilUtc = $p[4]; blockedUntilMs = $blockedMs
+            lastUpdatedMs = [math]::Round(([datetime]::Parse($p[5], $inv, $utc) - $StartUtc).TotalMilliseconds)
+        }
+    }
+    return $rows
+}
+
+function Complete-CaseCapture([string]$ErrorMessage) {
+    $c = $script:Case
+    if (-not $c) { return }
+    try {
+        foreach ($key in $Services.Keys) { Save-CaseLog $key }
+        $d   = $DemoCatalog[$c.Id]
+        $end = Get-Date
+
+        # The HttpClient "Start/End processing" pair repeats what the ClientHandler lines say,
+        # and the simulator emits four lines per request - keep one per request.
+        $logs = @{}
+        $logs['sender'] = @($c.Logs['sender'] | Where-Object { $_ -notmatch 'LogicalHandler\[' })
+        $logs['mock']   = @($c.Logs['mock'])
+        $logs['ingest'] = @($c.Logs['ingest'])
+        $logs['sim']    = @($c.Logs['sim'] | Where-Object { $_ -match 'Received HTTP response headers|Program\[|warn:|fail:|crit:' })
+
+        $result = $c.Result
+        if ($ErrorMessage) { $result = 'ABORTED' }
+        $sqlRows = @()
+        if ($d.Dir -like 'OUTBOUND*') { $sqlRows = @(Get-ReportSqlRows $c.Started.ToUniversalTime()) }
+
+        [void]$script:Report.Cases.Add([ordered]@{
+            id = $c.Id; title = $d.Title; dir = $d.Dir; from = $d.From; to = $d.To
+            plain = @($d.Plain); note = [string]$d.Note
+            started = $c.Started.ToString('yyyy-MM-dd HH:mm:ss.fff')
+            startClockMs = [math]::Round($c.Started.TimeOfDay.TotalMilliseconds)
+            durationMs = [math]::Round(($end - $c.Started).TotalMilliseconds)
+            result = $result; error = $ErrorMessage
+            params = @($c.Params); checks = @($c.Checks)
+            logs = $logs; sqlRows = $sqlRows; mockState = $c.MockState; data = $c.Data
+        })
+        Write-Report
+    } catch {
+        Write-Warn "report capture failed for $($c.Id): $($_.Exception.Message)"
+    } finally {
+        $script:Case = $null
+    }
+}
+
+function Write-Report {
+    if (-not (Test-Path -LiteralPath $ReportTemplate)) { Write-Warn "report template missing: $ReportTemplate"; return }
+    $payload = [ordered]@{
+        started = $script:Report.Started; mode = $script:Report.Mode
+        updated = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+        graphVersion = $script:GraphVersion
+        cases = @($script:Report.Cases)
+    }
+    # '</' would end the <script> element the data sits in.
+    $json = ($payload | ConvertTo-Json -Depth 12 -Compress).Replace('</', '<\/')
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $html = [System.IO.File]::ReadAllText($ReportTemplate, $utf8).Replace('__REPORT_DATA__', $json)
+    [System.IO.File]::WriteAllText($script:Report.File, $html, $utf8)
+    if (-not $script:Report.Announced) {
+        Write-Ok "visual report -> $($script:Report.File) (updated after every use case)"
+        $script:Report.Announced = $true
+    }
+}
+
+function Invoke-UseCase([string]$Id) {
+    Start-CaseCapture $Id
+    try { & $DemoCatalog[$Id].Fn }
+    catch { Complete-CaseCapture $_.Exception.Message; throw }
+    Complete-CaseCapture ''
 }
 
 # ------------------------------------------- demos -------------------------------------------
@@ -906,6 +1081,10 @@ function Demo-9-InboundScenario {
     Write-Host '  status counts:' -ForegroundColor White
     $result.statusCounts.PSObject.Properties | ForEach-Object { Write-Dim "HTTP $($_.Name) -> $($_.Value)" }
     Write-Dim "total sent $($result.totalSent), avg latency $([math]::Round($result.averageLatencyMs, 1)) ms"
+    Set-CaseData 'scenario' $name
+    Set-CaseData 'statusCounts' $result.statusCounts
+    Set-CaseData 'totalSent' $result.totalSent
+    Set-CaseData 'avgLatencyMs' ([math]::Round($result.averageLatencyMs, 1))
 
     $expect = @{
         'SteadyTraffic'    = '202 only'
@@ -918,6 +1097,7 @@ function Demo-9-InboundScenario {
         'MixedAttack'      = 'a blend of 401/413/429'
     }
     Write-Host "  expected shape: $($expect[$name])" -ForegroundColor White
+    Set-CaseData 'expectedShape' $expect[$name]
 }
 
 function Demo-10-BypassRules {
@@ -933,11 +1113,14 @@ function Demo-10-BypassRules {
     Write-Host "  POST /health (no HMAC signature) -> $health" -ForegroundColor White
     Write-Host "  GET  /anything                   -> $get" -ForegroundColor White
 
+    Set-CaseData 'health' "$health"
+    Set-CaseData 'get' "$get"
+
     $pass = $true
-    if ($health -eq '200') { Write-Ok 'excluded path bypassed the whole pipeline' }
-    else { Write-Err "expected 200, got $health"; $pass = $false }
-    if ($get -eq '404') { Write-Ok 'GET reached routing (GETs are never rate-limited)' }
-    else { Write-Err "expected 404, got $get"; $pass = $false }
+    if ($health -eq '200') { Write-Ok 'excluded path bypassed the whole pipeline'; Add-Check 'POST /health -> 200: excluded path bypassed the whole pipeline' $true }
+    else { Write-Err "expected 200, got $health"; $pass = $false; Add-Check "POST /health: expected 200, got $health" $false }
+    if ($get -eq '404') { Write-Ok 'GET reached routing (GETs are never rate-limited)'; Add-Check 'GET /anything -> 404: reached routing, GETs are never rate-limited' $true }
+    else { Write-Err "expected 404, got $get"; $pass = $false; Add-Check "GET /anything: expected 404, got $get" $false }
     Record-Result '3.2 bypass rules' $pass
 }
 
@@ -957,6 +1140,9 @@ function Demo-11-ObserveOnly {
     $denied = 0
     if ($raw) {
         $result = $raw | ConvertFrom-Json
+        Set-CaseData 'scenario' 'BurstSingleIp'
+        Set-CaseData 'statusCounts' $result.statusCounts
+        Set-CaseData 'totalSent' $result.totalSent
         Write-Host '  status counts:' -ForegroundColor White
         $result.statusCounts.PSObject.Properties | ForEach-Object {
             Write-Dim "HTTP $($_.Name) -> $($_.Value)"
@@ -966,10 +1152,10 @@ function Demo-11-ObserveOnly {
     $wouldDeny = @(Get-LogSince 'ingest' $mark | Where-Object { $_ -match 'OBSERVE ONLY' }).Count
 
     $pass = $true
-    if ($denied -eq 0) { Write-Ok 'nothing was rejected - all traffic passed' }
-    else { Write-Err "$denied requests were denied - observe-only is not in force"; $pass = $false }
-    if ($wouldDeny -gt 0) { Write-Ok "$wouldDeny 'would deny' lines recorded in logs\ingest.log" }
-    else { Write-Err "no 'OBSERVE ONLY' lines were logged"; $pass = $false }
+    if ($denied -eq 0) { Write-Ok 'nothing was rejected - all traffic passed'; Add-Check 'nothing was rejected - all traffic passed' $true }
+    else { Write-Err "$denied requests were denied - observe-only is not in force"; $pass = $false; Add-Check "$denied requests were denied - observe-only is not in force" $false }
+    if ($wouldDeny -gt 0) { Write-Ok "$wouldDeny 'would deny' lines recorded in logs\ingest.log"; Add-Check "$wouldDeny 'would deny' lines recorded in the ingest log" $true }
+    else { Write-Err "no 'OBSERVE ONLY' lines were logged"; $pass = $false; Add-Check "no 'OBSERVE ONLY' lines were logged" $false }
     Record-Result '3.3 observe-only' $pass
 
     Write-Step 'restoring enforce mode'
@@ -1032,7 +1218,7 @@ function Invoke-DemoSet([string[]]$Ids) {
     $script:Auto    = $true
     $script:Results = @()
     foreach ($id in $Ids) {
-        try { & $DemoCatalog[$id].Fn }
+        try { Invoke-UseCase $id }
         catch {
             Write-Err "use case $id could not run: $($_.Exception.Message)"
             Record-Result "$id (aborted)" $false
@@ -1054,6 +1240,7 @@ function Show-Summary {
     Write-Host ''
     if ($failed -eq 0) { Write-Host "  all $($script:Results.Count) demos passed" -ForegroundColor Green }
     else { Write-Host "  $failed of $($script:Results.Count) demos failed" -ForegroundColor Red }
+    if ($script:Report) { Write-Host "  visual report: $($script:Report.File)" -ForegroundColor Cyan }
 }
 
 # ------------------------------------------- startup -----------------------------------------
@@ -1115,7 +1302,7 @@ if ($Run) {
     }
     # Parameters take their defaults, but the operator is still offered the next use case.
     $script:Auto = $true
-    & $DemoCatalog[$id].Fn
+    Invoke-UseCase $id
     $script:Auto = $false
     $next = Prompt-NextDemo $id
     if ($next) { Invoke-DemoChain $next }

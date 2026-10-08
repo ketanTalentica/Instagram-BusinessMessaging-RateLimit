@@ -74,3 +74,6 @@ Desktop.ini
 *.tmp
 *.temp
 *~
+
+# Visual run reports written by scripts/Demo.ps1
+reports/

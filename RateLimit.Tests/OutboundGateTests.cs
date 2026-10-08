@@ -14,9 +14,27 @@ namespace RateLimit.Tests;
 /// </summary>
 public class OutboundGateTests
 {
-    private static PerSecondDispatchGate Gate(OutboundRateLimitOptions? options = null) =>
+    private static PerSecondDispatchGate Gate(OutboundRateLimitOptions? options = null, TimeProvider? time = null) =>
         new(TestOptions.Of(options ?? new OutboundRateLimitOptions()),
-            NullLogger<PerSecondDispatchGate>.Instance);
+            NullLogger<PerSecondDispatchGate>.Instance, time);
+
+    // When each call actually leaves: the moment it asked plus the wait it was given.
+    private static async Task<List<DateTimeOffset>> DispatchTimes(
+        PerSecondDispatchGate gate, TestTimeProvider clock, DispatchClass cls, IEnumerable<TimeSpan> gapsBeforeEachCall)
+    {
+        var times = new List<DateTimeOffset>();
+        foreach (var gap in gapsBeforeEachCall)
+        {
+            clock.Advance(gap);
+            var wait = await gate.GetDelayAsync(new OutboundDispatch("t", cls));
+            times.Add(clock.GetUtcNow() + wait);
+        }
+        return times;
+    }
+
+    // The most calls that leave inside any half-open one-second span — what a per-second cap counts.
+    private static int MostInAnySecond(IReadOnlyList<DateTimeOffset> times) =>
+        times.Max(start => times.Count(t => t >= start && t < start.AddSeconds(1)));
 
     private static async Task<int> WaitsIn(PerSecondDispatchGate gate, string tenant, DispatchClass cls, int calls)
     {
@@ -75,16 +93,59 @@ public class OutboundGateTests
     [Fact]
     public async Task Reservations_stack_so_concurrent_callers_are_paced_not_spun()
     {
-        var gate = Gate();
+        var clock = new TestTimeProvider();
+        var gate  = Gate(time: clock);
 
-        await gate.GetDelayAsync(new OutboundDispatch("t", DispatchClass.Conversations));
-        await gate.GetDelayAsync(new OutboundDispatch("t", DispatchClass.Conversations));
+        // Five callers at the same instant against the 2/s Conversations cap: two go now, two a
+        // second later, the fifth a second after that. Nobody spins and nobody overtakes.
+        var waits = new List<TimeSpan>();
+        for (var i = 0; i < 5; i++)
+            waits.Add(await gate.GetDelayAsync(new OutboundDispatch("t", DispatchClass.Conversations)));
 
-        var third  = await gate.GetDelayAsync(new OutboundDispatch("t", DispatchClass.Conversations));
-        var fourth = await gate.GetDelayAsync(new OutboundDispatch("t", DispatchClass.Conversations));
+        Assert.Equal(
+            [TimeSpan.Zero, TimeSpan.Zero, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2)],
+            waits);
+    }
 
-        Assert.True(third > TimeSpan.Zero);
-        Assert.True(fourth > third);   // each further caller waits longer, rather than racing
+    [Fact]
+    public async Task A_cold_start_never_lets_more_than_the_cap_out_in_one_second()
+    {
+        // Demo 2.1 in code form: 15 sends at once through a 4/s gate. The token bucket this gate
+        // replaced let 4 out at once and 3 more inside the same second (7 against the mock's 5).
+        var clock = new TestTimeProvider();
+        var gate  = Gate(new OutboundRateLimitOptions { PerSecondDispatchLimit = 4 }, clock);
+
+        var times = await DispatchTimes(gate, clock, DispatchClass.TextSend, Enumerable.Repeat(TimeSpan.Zero, 15));
+
+        Assert.Equal(4, MostInAnySecond(times));
+        Assert.Equal(4, times.Count(t => t < times[0].AddSeconds(1)));   // the first second exactly
+    }
+
+    [Fact]
+    public async Task Irregular_traffic_never_exceeds_the_cap_in_any_one_second_span()
+    {
+        // 300 calls with uneven gaps (fixed seed): bursts, lulls and everything between.
+        var clock = new TestTimeProvider();
+        var gate  = Gate(time: clock);
+        var rng   = new Random(20261008);
+        var gaps  = Enumerable.Range(0, 300).Select(_ => TimeSpan.FromMilliseconds(rng.Next(0, 4) == 0 ? rng.Next(0, 400) : 0));
+
+        var times = await DispatchTimes(gate, clock, DispatchClass.MediaSend, gaps);
+
+        Assert.True(MostInAnySecond(times) <= 10, $"saw {MostInAnySecond(times)} media sends inside one second (cap 10)");
+        Assert.Equal(10, MostInAnySecond(times));   // and the cap is actually reachable, not undershot
+    }
+
+    [Fact]
+    public async Task After_a_quiet_second_the_full_cap_is_available_again()
+    {
+        var clock = new TestTimeProvider();
+        var gate  = Gate(time: clock);
+
+        await WaitsIn(gate, "t", DispatchClass.Conversations, 2);
+        clock.Advance(TimeSpan.FromSeconds(1));
+
+        Assert.Equal(0, await WaitsIn(gate, "t", DispatchClass.Conversations, 2));
     }
 
     // ---------- throttle gate + guard composition ----------

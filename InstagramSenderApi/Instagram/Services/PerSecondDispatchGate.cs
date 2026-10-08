@@ -5,41 +5,64 @@ using InstagramSenderApi.Instagram.Infrastructure;
 namespace InstagramSenderApi.Instagram.Services;
 
 /// <summary>
-/// Client-side token bucket per tenant enforcing Meta's per-second messaging cap.
-/// Reservation-style (token balance may go negative): a caller that finds the bucket
-/// empty still takes a token and is told how long to wait, so concurrent callers are
-/// serialised fairly by increasing delays instead of spinning against the bucket.
+/// Client-side gate per tenant enforcing Meta's per-second messaging cap: never more than the cap
+/// in ANY one-second span, including the first second after a start.
+///
+/// Mechanism: a sliding-window log of reservations. Each key keeps the dispatch times of its last
+/// N calls (N = the cap); a caller is given the later of "now" and "the oldest of those N plus one
+/// second". Any N+1 consecutive dispatches therefore span at least one second, which is exactly the
+/// guarantee — and bursts up to the cap still go out at once, so 20 text sends under a 100/s cap
+/// never wait.
+///
+/// Why not the token bucket this replaced: a bucket that starts full and refills at the cap admits
+/// up to (capacity + rate - 1) calls inside one second — 7 for a 4/s gate — which is how demo 2.1
+/// hit the mock's 5/s cap. Shrinking the capacity closes that gap but smooths every burst, so text
+/// bursts well inside the cap would start waiting. The log costs N timestamps per key instead of two
+/// values; for the largest cap (100) that is 800 bytes per tenant and class.
 ///
 /// It shapes rather than rejects because here we are the client: a send we refuse is work lost,
-/// while a send we delay still happens. Returning a wait gives the behaviour of a leaky bucket
-/// with the state of a token bucket — two values per key, no queue.
+/// while a send we delay still happens. Reservations are taken under the key's lock, so concurrent
+/// callers are serialised into increasing delays instead of spinning against the window.
 ///
-/// Known trade-off, the classic one for this algorithm: a fresh bucket starts full, so the first
-/// second after a restart can emit up to 2x the cap. It is what makes demo 2.1 flaky (docs/DEMO.md
-/// section 4) and it is an open decision, not an oversight.
+/// What it cannot see: the guarantee holds at the moment we dispatch, not at Meta's door. Variable
+/// network latency can bunch calls together on arrival, so a cap configured exactly at Meta's limit
+/// has no margin for that — the demo runs 4/s against the mock's 5/s for this reason.
 ///
-/// Runs last in the pre-flight sequence: the token it hands out is for dispatching *now*,
+/// Runs last in the pre-flight sequence: the slot it hands out is for dispatching *now*,
 /// so any earlier gate's wait must already have elapsed.
 /// </summary>
 public sealed class PerSecondDispatchGate : IOutboundGate
 {
-    private sealed class Bucket
+    private sealed class Window
     {
-        public double Tokens;
-        public long   LastRefillTicks;
+        // Dispatch times (TimeProvider timestamps) of the last Slots.Length reservations, as a
+        // ring. Reservations are non-decreasing, so Slots[Next] is always the oldest.
+        public long[] Slots = [];
+        public int    Next;
+        public bool   Full;
+
+        public void Resize(int cap)
+        {
+            Slots = new long[cap];
+            Next  = 0;
+            Full  = false;
+        }
     }
 
-    private readonly ConcurrentDictionary<string, Bucket> _buckets =
+    private readonly ConcurrentDictionary<string, Window> _windows =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly IOptions<OutboundRateLimitOptions> _options;
     private readonly ILogger<PerSecondDispatchGate> _logger;
+    private readonly TimeProvider _time;
 
     public PerSecondDispatchGate(
         IOptions<OutboundRateLimitOptions> options,
-        ILogger<PerSecondDispatchGate> logger)
+        ILogger<PerSecondDispatchGate> logger,
+        TimeProvider? timeProvider = null)
     {
         _options = options;
         _logger  = logger;
+        _time    = timeProvider ?? TimeProvider.System;
     }
 
     public int Order => GateOrder.PerSecondDispatch;
@@ -48,7 +71,7 @@ public sealed class PerSecondDispatchGate : IOutboundGate
 
     /// <summary>
     /// Reserves this tenant's next slot for the call's class and returns how long the caller must
-    /// wait to stay inside the cap. Each class has its own bucket because Meta enforces them as
+    /// wait to stay inside the cap. Each class has its own window because Meta enforces them as
     /// separate limits — 100 text sends/s and 2 Conversations calls/s can run concurrently.
     /// </summary>
     public ValueTask<TimeSpan> GetDelayAsync(OutboundDispatch dispatch, CancellationToken ct = default)
@@ -81,27 +104,28 @@ public sealed class PerSecondDispatchGate : IOutboundGate
         };
     }
 
-    private TimeSpan Reserve(string bucketKey, int ratePerSecond)
+    private TimeSpan Reserve(string key, int capPerSecond)
     {
-        var bucket = _buckets.GetOrAdd(bucketKey, _ => new Bucket
+        var window = _windows.GetOrAdd(key, _ => new Window());
+
+        lock (window)
         {
-            Tokens          = ratePerSecond,
-            LastRefillTicks = Environment.TickCount64
-        });
+            if (window.Slots.Length != capPerSecond)
+                window.Resize(capPerSecond);
 
-        lock (bucket)
-        {
-            var now            = Environment.TickCount64;
-            var elapsedSeconds = (now - bucket.LastRefillTicks) / 1000.0;
-            bucket.LastRefillTicks = now;
-            bucket.Tokens = Math.Min(ratePerSecond, bucket.Tokens + elapsedSeconds * ratePerSecond);
+            var now = _time.GetTimestamp();
+            var at  = now;
 
-            bucket.Tokens -= 1;
-            if (bucket.Tokens >= 0)
-                return TimeSpan.Zero;
+            // The window holds N reservations already: this call may not go out until the oldest
+            // of them is a full second old.
+            if (window.Full)
+                at = Math.Max(now, window.Slots[window.Next] + _time.TimestampFrequency);
 
-            // Negative balance = reservation: wait until the deficit has refilled
-            return TimeSpan.FromSeconds(-bucket.Tokens / ratePerSecond);
+            window.Slots[window.Next] = at;
+            window.Next = (window.Next + 1) % capPerSecond;
+            if (window.Next == 0) window.Full = true;
+
+            return at > now ? _time.GetElapsedTime(now, at) : TimeSpan.Zero;
         }
     }
 }

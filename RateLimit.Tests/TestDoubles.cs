@@ -25,6 +25,12 @@ internal sealed class TestTimeProvider : TimeProvider
 
     public override DateTimeOffset GetUtcNow() => _now;
 
+    // The base class reads Stopwatch here, which Advance would not move; monotonic consumers
+    // (the per-second dispatch gate) must see the same hand-driven clock.
+    public override long GetTimestamp() => _now.UtcTicks;
+
+    public override long TimestampFrequency => TimeSpan.TicksPerSecond;
+
     public void Advance(TimeSpan by) => _now = _now.Add(by);
 
     public void Advance(double seconds) => Advance(TimeSpan.FromSeconds(seconds));

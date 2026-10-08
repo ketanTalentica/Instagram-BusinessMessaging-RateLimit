@@ -19,7 +19,7 @@ builder.Services.AddSingleton<InstagramThrottleGuard>();
 
 // Outbound pre-flight gates. Execution order comes from each gate's Order property, not from
 // these lines. PerSecondDispatchGate is resolved through its concrete registration so the guard
-// and anything else share one instance — the token buckets are the state.
+// and anything else share one instance — the dispatch windows are the state.
 builder.Services.AddSingleton<PerSecondDispatchGate>();
 builder.Services.AddSingleton<IOutboundGate, HeaderUsageThrottleGate>();
 builder.Services.AddSingleton<IOutboundGate>(sp => sp.GetRequiredService<PerSecondDispatchGate>());

@@ -69,6 +69,28 @@ What the runner handles that manual steps get wrong:
   credentials anywhere in this solution, so a real Graph call could not authenticate even if
   misconfigured, but the guard fails closed rather than relying on that.
 
+**Visual report — one HTML file per session.** Every runner session writes
+`reports\run-<yyyyMMdd-HHmmss>.html` (gitignored), rewritten after each use case so an interrupted
+session still leaves a complete file. It is self-contained (data embedded, inline SVG, no CDN) and
+opens offline. Per use case it draws what the run actually produced:
+
+| Id | Chart |
+|---|---|
+| 2.1 | calls in any rolling second against the mock cap and our gate; error responses in red |
+| 2.2, 2.5, 2.6, 2.7 | first seconds per tenant/app lane, then the block windows split into Meta's wait, the +1 min buffer and the queue pause, ending on `BlockedUntilUtc` from SQL |
+| 2.3 | usage per stored row against the 80 % line, plus the throttle delay the fresh tenant took |
+| 2.8 | three bursts on one timeline with gate waits, and a per-class pacing table |
+| 3.1, 3.3 | responses per second by status; in 3.3 a line for what enforce mode would have denied; denial reasons |
+| 3.2 | the rule pipeline with this run's two requests drawn through their bypass |
+
+Assertions, parameters, SQL rows, mock state and the raw log slices sit under each chart. Two
+honest limits: the runner stops watching after a few seconds, so block windows beyond that point
+are drawn faded as *scheduled* rather than observed; and request/response pairing is only drawn
+where a single tenant had calls in flight. The timeline needs timestamps, so the runner starts every
+service with `Logging__Console__FormatterOptions__TimestampFormat` / `SingleLine` set by environment
+variable — checked-in appsettings are unchanged, and attach mode (`-SkipStart`) has no timelines.
+Template: [scripts/report-template.html](../scripts/report-template.html).
+
 Service output goes to `logs\<service>.log` (gitignored). Menu option **L** opens live tail windows;
 **S** shows port/row status; **R** resets outbound state; **B** stops, rebuilds and restarts;
 **A**/**I** run all outbound/inbound use cases unattended.
@@ -219,14 +241,19 @@ than our own cap, so Meta never has to refuse one.
 returns how long the call must wait and `InstagramThrottleGuard` does the waiting, in ascending
 `Order`
 ([InstagramThrottleGuard.cs:50-54](../InstagramSenderApi/Instagram/Services/InstagramThrottleGuard.cs#L50-L54)).
-`PerSecondDispatchGate` is deliberately last — its token is for dispatching *now*, so anything that
-sleeps must already have slept. The gate is a reservation-style token bucket keyed
-`{tenantId}|{class}`: a caller that finds it empty still takes a token and is told how long to wait,
-so concurrent callers serialise into increasing delays instead of spinning against the bucket
-([PerSecondDispatchGate.cs:76-98](../InstagramSenderApi/Instagram/Services/PerSecondDispatchGate.cs#L76-L98)).
+`PerSecondDispatchGate` is deliberately last — the slot it hands out is for dispatching *now*, so
+anything that sleeps must already have slept. The gate keeps a sliding-window log keyed
+`{tenantId}|{class}`: the dispatch times of the last N calls (N = the cap). A caller is given the
+later of "now" and "the oldest of those N plus one second", so any N+1 consecutive calls span at
+least a second — never more than the cap in **any** one-second span, from the very first call — while
+a burst up to the cap still leaves at once. Concurrent callers serialise into increasing delays
+instead of spinning
+([PerSecondDispatchGate.cs](../InstagramSenderApi/Instagram/Services/PerSecondDispatchGate.cs)).
 The cap in force comes from `RateLimiting:Outbound:PerSecondDispatchLimit`.
 
-Mock enforces 5 calls/s; the sender's client-side token bucket paces at 4/s, so the cap is never hit.
+Mock enforces 5 calls/s; the sender's gate allows at most 4 in any second, so the cap is never hit.
+The one-call margin is deliberate: the gate's guarantee holds when we dispatch, and network latency
+can bunch calls slightly on arrival.
 An empty payload on `/messages` classifies as the **text** class, so the override above
 (`PerSecondDispatchLimit`) is the cap in force here — see demo 2.8 for the other classes.
 
@@ -585,39 +612,37 @@ This is how production thresholds get chosen from a week of real traffic before 
 
 ## 4. Verified results summary
 
-Last full re-verification: **2026-09-14 on Graph v25.0**, after the interface break-up
-(`IInboundRule` / `IOutboundGate` / policy-based `IRateLimitStore`) — **6/7 outbound and 2/2
-asserting inbound demos PASS**, solution builds with 0 warnings, `RateLimit.Tests` 80/80 green.
-Previous full re-verification 2026-08-05 (7/7 + 2/2); earlier manual verification: 2.1–2.3 and 3.x on
-2026-07-07, 2.5–2.8 on 2026-08-04.
+Last full re-verification: **2026-10-08 on Graph v25.0**, after replacing the per-second gate's
+token bucket with a sliding-window log — **7/7 outbound and 2/2 asserting inbound demos PASS**
+(runner `-Run all`, report `reports\run-20261008-170100.html`; an earlier `-Run outbound` the same
+day was also 7/7), solution builds with 0 warnings, `RateLimit.Tests` 83/83 green. Previous:
+2026-09-14 (6/7 + 2/2, 2.1 failing), 2026-08-05 (7/7 + 2/2); earlier manual verification: 2.1–2.3
+and 3.x on 2026-07-07, 2.5–2.8 on 2026-08-04.
 
-> **2.1 currently fails under the runner on this machine — a demo race, not a code defect.**
-> Reproduced 3/3 with the refactored code *and* 1/1 with the pre-refactor code checked out
-> (identical failure: mock `errorCode=17`, `isBlocked=True`, `callCountPct=10`), so the interface
-> work is not the cause. Driven by hand with the same parameters it passes (15 sent, 0 errors,
-> `callCountPct: 30`).
+> **2.1 failed under the runner until 2026-10-08 — it was a real gate defect, not a demo race.**
+> The token bucket started full and refilled at the cap, so a cold start admitted up to
+> capacity + rate − 1 calls inside one second (7 for a 4/s gate) against a mock that allows 5; the
+> 6th call drew code 17. The same arithmetic applies in production at 100/s. Fixed in
+> [PerSecondDispatchGate.cs](../InstagramSenderApi/Instagram/Services/PerSecondDispatchGate.cs): a
+> sliding-window log admits at most N calls in **any** one-second span, cold start included, and
+> still lets a burst up to N leave at once. Regression test:
+> `A_cold_start_never_lets_more_than_the_cap_out_in_one_second`.
 >
-> **Mechanism:** the token bucket starts *full* and refills at the same rate, so a cold bucket can
-> emit up to **2× the cap** inside one fixed second — 4 immediate + up to 4 refilled against a mock
-> that allows 5. The mock's 1-second window starts when the scenario is applied
-> ([GraphApiEndpoints.cs:53-63](../InstagramGraphMock/Endpoints/GraphApiEndpoints.cs#L53-L63)),
-> which is immediately before the burst, so whether the demo passes hinges on how long the freshly
-> restarted sender takes to dispatch its first call. A gate of 4/s against a cap of 5/s has no room
-> for that. Options, in order of preference: drop the demo's gate default to **3/s**
-> ([Demo.ps1:699](../scripts/Demo.ps1#L699)) — 3 immediate + 2 paced = 5, inside the cap at every
-> offset — or raise the mock cap; changing the bucket's cold-start behaviour is a production change
-> and is tracked separately.
+> One residual effect, visible in the report: the gate's guarantee holds when it hands out the
+> slot. The HTTP request is logged a few ms later, and the first call after a start is slower to get
+> there (34 ms on 2026-10-08), so on the wire two calls can sit slightly under a second apart. That is
+> why the demo gate stays one below the mock's cap; production needs the same headroom against Meta.
 
 | Demo | Feature | Observed |
 |---|---|---|
-| 2.1 | Per-second dispatch gate (O9) | 15/15 sent, 0 blocks at mock 5/s cap (2026-08-05, and by hand 2026-09-14) — **fails under the runner on 2026-09-14, see the note above** |
+| 2.1 | Per-second dispatch gate (O9) | 15/15 sent, 0 rate-limit errors at mock 5/s cap; busiest one-second span 4 at the gate (2026-10-08, sliding-window log). Failed 2026-09-14 under the old token bucket, see the note above |
 | 2.2 | Retry-After on 429 (O11) | 90 s header → 2 min +1 buffer block persisted, job re-queued, no inline retry |
 | 2.3 | Shared app budget (O10) | Fresh tenant's first send delayed 9,375 ms off the `app:{AppId}` row at 92% |
 | 2.3 | Level separation (A12.8) | app row 92 %, `tenant-light` row **5 %** — the same row read 92 % before the fix |
 | 2.5 | Instagram BUC code 80002 (A12.1) | `level=account`, 8-min ETA honoured → 9-min pause, job re-queued |
 | 2.6 | 613 / subcode 1996 (A12.2) | 15-min floor applied from the subcode alone (no ETA in the response) |
 | 2.7 | App-level block, code 4 (A12.7) | Block on `app:{AppId}`, receiving account unblocked at its own 20 %, unrelated tenant `held by an APP-level block for 00:06:55` with no HTTP call |
-| 2.8 | Per-class per-second caps (A12.3) | 20 video sends → 10 waits at `cap=10/s`; 20 text sends on the same endpoint → 0 waits; 6 `/conversations` → 4 waits at `cap=2/s` |
+| 2.8 | Per-class per-second caps (A12.3) | 20 video sends → 2 waits at `cap=10/s` (longest 858 ms: the 11th call waits until the 1st is a second old, after which the queue's own pace keeps the rest inside the window); 20 text sends on the same endpoint → 0 waits; 6 `/conversations` → 4 waits at `cap=2/s` (2026-10-08). Under the token bucket media showed ~10 short waits |
 | 3.1 | Per-IP window regression | 60×202 + 140×429 (2026-07-07), 47×202 + 153×429 (2026-08-05), Retry-After 59 |
 | 3.1 | Global window | 780×202 + 180×429 at 1000/min |
 | 3.2 | ExcludedPaths / GET bypass | POST /health 200 during saturated window; GET routed normally |

@@ -97,7 +97,7 @@ Layer 2 — REACTIVE (Polly pipeline, one per tenant)
 
 ### July 2026 coverage additions (plan deltas O9–O11 — implemented & live-verified)
 
-- **O9 `PerSecondDispatchGate`** (`Instagram/Services/`): per-tenant token bucket (reservation-style, balance may go negative) enforced by `InstagramThrottleGuard` as the last pre-flight step. Covers Meta's per-second caps, which usage headers cannot predict — they reflect hourly budget windows, not instantaneous rates. Configured via `RateLimiting:Outbound:PerSecondDispatchLimit` (default 100) *and, since the August 2026 pass below, three further per-class caps*. Verified: 15 sends through a 4/s gate against a 5/s mock cap → zero code-17 errors.
+- **O9 `PerSecondDispatchGate`** (`Instagram/Services/`): per-tenant sliding-window log of reservations — never more than the cap in any one-second span, cold start included (a reservation token bucket until Oct 2026; see TRD §8.2) — enforced by `InstagramThrottleGuard` as the last pre-flight step. Covers Meta's per-second caps, which usage headers cannot predict — they reflect hourly budget windows, not instantaneous rates. Configured via `RateLimiting:Outbound:PerSecondDispatchLimit` (default 100) *and, since the August 2026 pass below, three further per-class caps*. Verified: 15 sends through a 4/s gate against a 5/s mock cap → zero code-17 errors.
 - **O10 shared app budget**: `X-App-Usage` is one budget for ALL accounts on the FB app, so `InstagramRateLimitHandler` mirrors it to a global state row keyed `app:{AppId}` (`RateLimiting:Outbound:AppId`); `TenantRateLimitService.GetThrottleDelayAsync` throttles on `max(tenantPct, appPct)`. Verified: a fresh tenant's first-ever send was delayed 9,375 ms purely from the app row at 92%. *(Superseded in part by the August 2026 pass below: the app row now DOES carry a block, for app-level codes 4 / 613.)*
 - **O11 `Retry-After` on HTTP 429**: any 429 is treated as rate-limited even without a recognised Graph error code; `Retry-After` (delta-seconds and HTTP-date forms) is parsed to minutes (ceil, min 1) and merged with the error-body ETA. Verified with the mock's `RetryAfter429` scenario (429 + `Retry-After: 90`, unrecognised code → 2-min block +1 buffer, job re-queued). The mock's body code for this scenario is now Meta's `1` ("API Unknown"); it was 613 until the August-2026 pass made 613 a recognised rate-limit code, which would have let the scenario pass through the code list instead of the header path it exists to test. Re-verified 2026-08-05.
 - **Config gate**: `RateLimiting:Outbound:Enabled` switches all guard enforcement off (observe-first rollout); the header-parsing handler always records state regardless.
@@ -145,7 +145,7 @@ InstagramSenderApi/
 │   │   ├── IOutboundGate.cs                ← gate contract + GateOrder + OutboundDispatch
 │   │   ├── InstagramThrottleGuard.cs       ← runs the gates in order and does the waiting
 │   │   ├── HeaderUsageThrottleGate.cs      ← proactive delay from the persisted usage rows
-│   │   ├── PerSecondDispatchGate.cs        ← token bucket per tenant per dispatch class
+│   │   ├── PerSecondDispatchGate.cs        ← sliding-window log per tenant per dispatch class
 │   │   ├── DispatchClass.cs                ← the classes + DispatchClassifier
 │   │   └── TenantBlockedException.cs       ← thrown when tenant is hard-blocked
 │   │
@@ -351,7 +351,7 @@ As-built gates, in order:
 | Order | Gate | Wait it returns |
 |---|---|---|
 | 100 | `HeaderUsageThrottleGate` | the proactive delay from `GetThrottleDelayAsync` (headers, `max(tenantPct, appPct)` ≥ 80%) |
-| 200 | `PerSecondDispatchGate` | the token-bucket deficit for this tenant *and dispatch class* |
+| 200 | `PerSecondDispatchGate` | the wait until the oldest of the last N dispatches for this tenant *and dispatch class* is a second old |
 
 `PerSecondDispatchGate` is last by design: its token is for dispatching *now*, so any earlier gate's
 wait must already have elapsed, or the token is spent on a call that has not happened yet.
@@ -412,7 +412,7 @@ services.AddSingleton<InstagramThrottleGuard>();
 
 // Pre-flight gates. Execution order comes from each gate's Order property, not these lines.
 // PerSecondDispatchGate is resolved through its concrete registration so the guard and anything
-// else share one instance — the token buckets are the state.
+// else share one instance — the dispatch windows are the state.
 services.AddSingleton<PerSecondDispatchGate>();
 services.AddSingleton<IOutboundGate, HeaderUsageThrottleGate>();
 services.AddSingleton<IOutboundGate>(sp => sp.GetRequiredService<PerSecondDispatchGate>());
