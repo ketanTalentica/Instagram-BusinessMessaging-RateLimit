@@ -1,0 +1,6 @@
+﻿@InstagramSenderApi_HostAddress = http://localhost:5070
+
+GET {{InstagramSenderApi_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
